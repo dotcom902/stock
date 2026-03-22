@@ -1,0 +1,25 @@
+name: Daily Stock Scan & Email
+
+on:
+  schedule:
+    - cron:  '20 0 * * *'   # UTC，每天08:20台灣時間
+  workflow_dispatch:
+
+jobs:
+  scan-and-mail:
+    runs-on: ubuntu-latest
+    env:
+      MAIL_TO: ${{ secrets.MAIL_TO }}
+      MAIL_USER: ${{ secrets.MAIL_USER }}
+      MAIL_PASS: ${{ secrets.MAIL_PASS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run stock scan and email
+        run: python main.py
