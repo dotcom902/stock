@@ -11,7 +11,7 @@ warnings.filterwarnings('ignore')
 
 # 掃描股票池 (去重)
 scan_universe = list(set([
-    'NVDA', 'AMD', 'TSM', 'AVGO', 'MU', 'MSFT', 'GOOGL', 'META', 'PLTR',
+    'NVDA', 'AMD', 'TSM', 'AVGO', 'MU', 'MSFT', 'GOOGL', 'META', 'PLTR', 'CRWV' , 'PLTR' ,'NBIS'
     'MSTR', 'COIN', 'IREN', 'CLSK', 'MARA', 'CRCA',
     'RKLB', 'ASTS', 'SIDU', 'BKSY', 'ONDS',
     'SERV', 'SYM', 'RR',
