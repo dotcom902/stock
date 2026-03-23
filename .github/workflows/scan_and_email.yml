@@ -2,7 +2,7 @@ name: Daily Stock Scan & Email
 
 on:
   schedule:
-    - cron:  '20 0 * * *'   # UTC，每天08:20台灣時間
+    - cron:  '30 14 * * 1-5'   # UTC，每天22:30台灣時間
   workflow_dispatch:
 
 jobs:
