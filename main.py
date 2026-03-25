@@ -14,18 +14,24 @@ import urllib.parse
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 參數設定區
+# 參數設定區 (加入你的專屬強勢板塊與持倉)
 # ==========================================
-MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
+MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR', 'SPY', 'QQQ', 'GDX'] 
+
+# ✨ 新增：強勢板塊自選池 (太空、光通訊、半導體、AI機器人等)
+HOT_SECTORS = [
+    'RKLB', 'ASTS', 'BKSY', 'SIDU', 'PLTR', # 太空與國防大數據
+    'LITE', 'COHR', 'FN', 'LUMN',           # 光通訊 (矽光子)
+    'AMD', 'MU', 'ARM', 'SMCI',             # 半導體與AI伺服器
+    'ONDS', 'SERV', 'SYM'                   # 自動化與機器人
+]
 
 # ==========================================
 # 網路連線設定 (偽裝成真人瀏覽器)
 # ==========================================
 REQ_SESSION = requests.Session()
 REQ_SESSION.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 })
 
 # ==========================================
@@ -33,13 +39,11 @@ REQ_SESSION.headers.update({
 # ==========================================
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
-    
     try:
         news = ticker_obj.news
         if news and len(news) > 0:
             for item in news[:5]:
-                if 'title' in item:
-                    news_items.append({'title': item['title'], 'publisher': item.get('publisher', 'Yahoo')})
+                if 'title' in item: news_items.append({'title': item['title'], 'publisher': item.get('publisher', 'Yahoo')})
             if news_items: return news_items
     except: pass
 
@@ -50,8 +54,7 @@ def get_robust_news(ticker_obj, ticker_symbol):
             root = ET.fromstring(response.content)
             for item in root.findall('.//item')[:5]:
                 title_elem = item.find('title')
-                if title_elem is not None:
-                    news_items.append({'title': title_elem.text, 'publisher': 'Yahoo RSS'})
+                if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Yahoo RSS'})
             if news_items: return news_items
     except: pass
 
@@ -63,16 +66,11 @@ def get_robust_news(ticker_obj, ticker_symbol):
             root = ET.fromstring(response.content)
             for item in root.findall('.//channel/item')[:5]:
                 title_elem = item.find('title')
-                if title_elem is not None:
-                    news_items.append({'title': title_elem.text, 'publisher': 'Google News'})
+                if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Google News'})
             if news_items: return news_items
     except: pass
-
     return [] 
 
-# ==========================================
-# 動態抓取 Nasdaq 100
-# ==========================================
 def get_nasdaq_100_tickers():
     print("正在獲取 Nasdaq 100 成分股...")
     try:
@@ -83,23 +81,42 @@ def get_nasdaq_100_tickers():
             if 'Ticker' in table.columns: return table['Ticker'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
             elif 'Symbol' in table.columns: return table['Symbol'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
     except Exception as e:
-        return ['AAPL', 'MSFT', 'NVDA', 'GOOGL', 'AMZN'], f"⚠️ 抓取失敗，使用備用清單 ({e})"
+        return ['AAPL', 'MSFT'], f"⚠️ 抓取失敗，使用備用清單 ({e})"
     return ['AAPL'], "⚠️ 發生未知錯誤"
 
 # ==========================================
-# 數據驗證與基本面抓取
+# 數據驗證與基本面/板塊抓取
 # ==========================================
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     score = 50
     latest_news_str = "無最新新聞" 
+    sector = "未知板塊"
+    days_to_earnings = "未知"
+
     try:
         info = ticker_obj.info
-        if not info or not isinstance(info, dict):
-            raise ValueError("無法獲取股票 info 數據")
+        if not info: raise ValueError("無法獲取 info")
 
+        # ✨ 新增 1：獲取產業板塊
+        sector = info.get('sector', '未知板塊')
+        industry = info.get('industry', '')
+        if industry: sector = f"{sector} ({industry})"
+
+        # ✨ 新增 2：計算距離下次財報天數 (避險用)
+        # Yahoo 的財報時間戳記有時會缺失，這裡做嚴格防呆
+        earn_ts = info.get('earningsTimestamp')
+        if earn_ts:
+            earn_date = datetime.fromtimestamp(earn_ts)
+            days = (earn_date.date() - datetime.today().date()).days
+            if days >= 0:
+                days_to_earnings = f"{days} 天後"
+                if days <= 5: days_to_earnings = f"⚠️ {days}天後(避開Sell Put)"
+            else:
+                days_to_earnings = "近期已發布"
+
+        # 基本面評分計算
         current_price = info.get('currentPrice', 0)
         target_price = info.get('targetMeanPrice', 0)
-        
         if current_price and target_price and current_price > 0 and target_price > 0:
             upside = (target_price - current_price) / current_price
             if upside > 0.15: score += 15
@@ -113,7 +130,6 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
         bear_keywords = ['downgrade', 'miss', 'cut', 'drop', 'lawsuit', 'sell', 'lower', 'weak']
         
         news_list_raw = get_robust_news(ticker_obj, ticker_symbol)
-            
         if news_list_raw:
             news_score = 0
             news_display = [] 
@@ -121,30 +137,27 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
                 title = article.get('title', '')
                 if any(k in title.lower() for k in bull_keywords): news_score += 4
                 if any(k in title.lower() for k in bear_keywords): news_score -= 5
-                
                 if i < 2 and title:
                     publisher = article.get('publisher', '')
                     display_text = f"▪️ {title}" if " - " in title else f"▪️ {title} ({publisher})"
                     news_display.append(display_text)
 
             score += news_score
-            if news_display:
-                latest_news_str = "<br><br>".join(news_display)
+            if news_display: latest_news_str = "<br><br>".join(news_display)
 
-        return max(0, min(100, score)), latest_news_str
+        return max(0, min(100, score)), latest_news_str, sector, days_to_earnings
     except Exception as e:
-        print(f"[{ticker_symbol}] 基本面/新聞抓取異常: {e}")
-        return 50, "數據抓取異常"
+        return 50, "數據抓取異常", "未知", "未知"
 
-# ==========================================
-# 期權策略建議 
-# ==========================================
-def get_investment_strategy(ticker_obj, current_price, score, signal_type):
+def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_to_earnings):
+    # 若財報將近，強制警告不要 Sell Put
+    earnings_warning = "⚠️財報將近" in days_to_earnings
+
     if signal_type == "超跌反彈":
         if score < 40: return {'綜合建議': '🔴 觀望(基本面轉弱)', '期權履約價': '-', '年化報酬': '-'}
         try:
             exp_dates = ticker_obj.options
-            if not exp_dates or len(exp_dates) == 0: raise ValueError("無期權日期")
+            if not exp_dates or len(exp_dates) == 0: raise ValueError("無期權")
                 
             today = datetime.today()
             target_date, target_days = None, 0
@@ -157,23 +170,23 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type):
             if not target_date: return {'綜合建議': '🟢 買入正股(無合適期權)', '期權履約價': '-', '年化報酬': '-'}
             
             chain = ticker_obj.option_chain(target_date)
-            if chain.puts.empty: raise ValueError("無 Put 報價")
+            if chain.puts.empty: raise ValueError("無 Put")
             
             cushion = 0.92 if score >= 60 else 0.85
             suitable_puts = chain.puts[chain.puts['strike'] <= current_price * cushion]
-            
-            if suitable_puts.empty: return {'綜合建議': '🟢 買入正股(防守空間不足)', '期權履約價': '-', '年化報酬': '-'}
+            if suitable_puts.empty: return {'綜合建議': '🟢 買入正股', '期權履約價': '-', '年化報酬': '-'}
             
             best_put = suitable_puts.sort_values(by='strike', ascending=False).iloc[0]
             premium = best_put['bid'] if best_put['bid'] > 0 else best_put['lastPrice']
-            
             if premium <= 0 or best_put['strike'] - premium <= 0: raise ValueError("權利金異常")
                 
             annual_roc = (premium / (best_put['strike'] - premium)) * 100 * (365 / target_days)
-            action = '🟢 積極 Sell Put / 買入正股' if score >= 60 else '🟡 保守 Sell Put'
+            
+            action = '🟢 積極 Sell Put / 買正股' if score >= 60 else '🟡 保守 Sell Put'
+            if earnings_warning: action = '🔴 避開期權(財報高風險)，僅小注正股'
+
             return {'綜合建議': action, '期權履約價': f"Put ${best_put['strike']} ({target_date})", '年化報酬': f"{round(annual_roc, 1)}%"}
-        except: 
-            return {'綜合建議': '🟢 買入正股', '期權履約價': '-', '年化報酬': '-'}
+        except: return {'綜合建議': '🟢 買入正股', '期權履約價': '-', '年化報酬': '-'}
             
     elif signal_type == "動能突破":
         if score >= 65: return {'綜合建議': '🚀 順勢買入正股 / Buy Call', '期權履約價': '-', '年化報酬': '-'}
@@ -183,16 +196,14 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type):
 # ==========================================
 # 主掃描函數 
 # ==========================================
-def scan_market_opportunities(tickers_list, portfolio_list):
-    all_tickers = list(set(tickers_list + portfolio_list))
+def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
+    # 將 Nasdaq 100、持倉、熱門板塊全部合併去重
+    all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
     
     print(f"開始下載 {len(all_tickers)} 檔股票歷史股價...")
-    # ✨ 關鍵修復：這裡加上了 session=REQ_SESSION，突破 Yahoo 對批次下載的阻擋
     df_data = yf.download(all_tickers, period="3mo", progress=False)
     
-    if df_data.empty:
-        print("❌ 歷史股價下載完全失敗！(可能被 Yahoo 阻擋)")
-        return pd.DataFrame()
+    if df_data.empty: return pd.DataFrame()
         
     df_closes = df_data['Close'].dropna(axis=1, how='all')
     df_volumes = df_data['Volume'].dropna(axis=1, how='all')
@@ -207,7 +218,6 @@ def scan_market_opportunities(tickers_list, portfolio_list):
             delta = close_prices.diff()
             gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
             loss = -delta.clip(upper=0).ewm(alpha=1/14, adjust=False).mean()
-            
             rs = gain / loss
             rs = rs.replace([np.inf, -np.inf], np.nan).fillna(100)
             rsi = 100 - (100 / (1 + rs))
@@ -217,42 +227,57 @@ def scan_market_opportunities(tickers_list, portfolio_list):
             latest_price = close_prices.iloc[-1]
             bias_20 = ((latest_price - ma20.iloc[-1]) / ma20.iloc[-1]) * 100
             
-            # 優化成交量防呆，避免 NaN 錯誤
+            # ✨ 新增 3：計算 RVOL (成交量熱度倍數)
             volumes = df_volumes[ticker].dropna()
+            rvol = 0.0
             vol_surge = False
             if len(volumes) >= 20:
                 vol_ma20 = volumes.rolling(window=20).mean().iloc[-1]
                 latest_vol = volumes.iloc[-1]
                 if pd.notna(vol_ma20) and vol_ma20 > 0:
-                    vol_surge = latest_vol > vol_ma20 * 1.2 
+                    rvol = round(latest_vol / vol_ma20, 2)
+                    vol_surge = rvol > 1.2 
             
             signal_type = None
             if latest_rsi < 35 and bias_20 < -6: signal_type = "超跌反彈"
             elif latest_rsi > 65 and bias_20 > 5 and vol_surge: signal_type = "動能突破"
                 
             is_portfolio = ticker in portfolio_list
+            is_hot_sector = ticker in hot_sectors_list
+
             if is_portfolio and not signal_type: signal_type = "持倉監控"
+            elif is_hot_sector and not signal_type and rvol > 1.5: signal_type = "板塊異動(爆量)"
                 
             if signal_type:
                 print(f"分析中: {ticker} ({signal_type})...")
                 stock_obj = yf.Ticker(ticker)
-                fund_score, latest_news = get_fundamental_sentiment_score(stock_obj, ticker)
-                strategy = get_investment_strategy(stock_obj, latest_price, fund_score, signal_type)
+                fund_score, latest_news, sector, days_to_earnings = get_fundamental_sentiment_score(stock_obj, ticker)
+                strategy = get_investment_strategy(stock_obj, latest_price, fund_score, signal_type, days_to_earnings)
                 
                 if signal_type == "持倉監控":
-                    strategy['綜合建議'] = "🔹 日常追蹤 (未觸發極端訊號)" if fund_score >= 50 else "⚠️ 基本面弱化，留意停損"
+                    strategy['綜合建議'] = "🔹 日常追蹤" if fund_score >= 50 else "⚠️ 基本面弱化，留意停損"
+
+                identity = '🔍 掃描發現'
+                if is_portfolio: identity = '💼 我的持倉'
+                elif is_hot_sector: identity = '🔥 熱門板塊'
 
                 stock_data = {
-                    '身份': '💼 我的持倉' if is_portfolio else '🔍 掃描發現',
-                    '代碼': ticker, '型態': signal_type, '現價': round(latest_price, 2),
-                    'RSI': round(latest_rsi, 2), '基本面評分': f"{int(fund_score)}分",
-                    '綜合建議': strategy['綜合建議'], '期權履約價': strategy['期權履約價'],
-                    '年化報酬': strategy['年化報酬'], '最新新聞': latest_news
+                    '身份': identity,
+                    '代碼': ticker, 
+                    '產業板塊': sector,           # 新增欄位
+                    '型態': signal_type, 
+                    '現價': round(latest_price, 2),
+                    'RSI': round(latest_rsi, 2), 
+                    '熱度(RVOL)': f"{rvol}x",    # 新增欄位
+                    '財報日': days_to_earnings,  # 新增欄位
+                    '評分': f"{int(fund_score)}",
+                    '綜合建議': strategy['綜合建議'], 
+                    '期權履約價': strategy['期權履約價'],
+                    '年化報酬': strategy['年化報酬'], 
+                    '最新新聞': latest_news
                 }
                 results.append(stock_data)
         except Exception as e:
-            # ✨ 新增：印出個別股票錯誤原因，方便後續 Debug
-            print(f"❌ [{ticker}] 計算過程發生錯誤: {e}")
             continue
 
     return pd.DataFrame(results)
@@ -268,14 +293,15 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
     
     html_style = """
     <style>
-        body { font-family: Arial, sans-serif; color: #333; }
-        .status-box { background-color: #f8f9fa; border-left: 4px solid #3498db; padding: 10px 15px; margin-bottom: 20px; font-size: 14px; }
-        table { border-collapse: collapse; width: 100%; font-size: 13px; table-layout: fixed; }
-        th { background-color: #2c3e50; color: white; padding: 10px; text-align: center; }
-        td { border: 1px solid #bdc3c7; padding: 8px; text-align: center; word-wrap: break-word; }
-        tr:nth-child(even) { background-color: #f2f2f2; }
-        th:last-child { width: 35%; }
-        td:last-child { text-align: left; font-size: 12px; color: #34495e; line-height: 1.4; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; color: #2c3e50; }
+        .status-box { background-color: #ecf0f1; border-left: 4px solid #3498db; padding: 12px 15px; margin-bottom: 20px; font-size: 13px; line-height: 1.5; }
+        table { border-collapse: collapse; width: 100%; font-size: 12px; table-layout: fixed; }
+        th { background-color: #2c3e50; color: white; padding: 10px 5px; text-align: center; }
+        td { border: 1px solid #bdc3c7; padding: 8px 5px; text-align: center; word-wrap: break-word; vertical-align: middle; }
+        tr:nth-child(even) { background-color: #f8f9fa; }
+        th:last-child { width: 25%; }
+        td:last-child { text-align: left; font-size: 11px; color: #34495e; line-height: 1.4; }
+        .high-rvol { color: #e74c3c; font-weight: bold; }
     </style>
     """
     full_html = f"<html><head>{html_style}</head><body>{body}</body></html>"
@@ -292,29 +318,38 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
 
 if __name__ == "__main__":
     ndx_tickers, fetch_status_msg = get_nasdaq_100_tickers()
-    target_df = scan_market_opportunities(ndx_tickers, MY_PORTFOLIO)
+    target_df = scan_market_opportunities(ndx_tickers, MY_PORTFOLIO, HOT_SECTORS)
     
-    subject = f"🧠 量化早報：波段掃描與持倉監控 ({datetime.today().strftime('%Y-%m-%d')})"
-    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 已載入持倉股票監控：{', '.join(MY_PORTFOLIO)}</div>"
+    subject = f"🧠 量化早報：多板塊熱力掃描 ({datetime.today().strftime('%Y-%m-%d')})"
+    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 | 🔥 熱門板塊池：{len(HOT_SECTORS)} 檔</div>"
     
     if target_df.empty:
-        # 修改提示詞，讓信件內容更清楚知道是沒抓到資料還是沒有達標
-        body = f"{status_html}<h3>今日掃描結果</h3><p>歷史股價下載失敗，或今日無任何股票符合極端策略條件。<br>請登入 GitHub Actions 查看詳細執行日誌 (Logs)。</p>"
+        body = f"{status_html}<h3>今日無符合條件標的</h3>"
     else:
-        target_df = target_df.sort_values(by=['身份', '型態', '基本面評分'], ascending=[False, False, False])
+        # ✨ 新增排序邏輯：1.身份優先(持倉>熱門>一般) 2.型態 3.成交量熱度(RVOL)降冪
+        target_df['身份權重'] = target_df['身份'].map({'💼 我的持倉': 1, '🔥 熱門板塊': 2, '🔍 掃描發現': 3})
+        # 將 RVOL 的 "x" 拿掉轉成數字來排序
+        target_df['RVOL_num'] = target_df['熱度(RVOL)'].str.replace('x', '').astype(float)
+        
+        target_df = target_df.sort_values(by=['身份權重', '型態', 'RVOL_num'], ascending=[True, False, False])
+        target_df = target_df.drop(columns=['身份權重', 'RVOL_num']) # 隱藏輔助排序欄位
+        
         pd.set_option('display.max_colwidth', None)
+        html_table = target_df.to_html(index=False, escape=False)
+        
+        # 標記高成交量
+        html_table = html_table.replace('<td>2.', '<td class="high-rvol">🔥 2.')
+        html_table = html_table.replace('<td>3.', '<td class="high-rvol">🔥 3.')
         
         body = (f"{status_html}"
-                f"<h2>🎯 發現 {len(target_df)} 檔關注標的：</h2>"
-                f"<p>已套用成交量濾網與三層新聞防護機制。</p>"
-                f"{target_df.to_html(index=False, escape=False)}")
+                f"<h2>🎯 發現 {len(target_df)} 檔異動標的：</h2>"
+                f"{html_table}")
         
+        # Emoji 顏色渲染
         body = body.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
         body = body.replace('🟢', '<span style="color:#27ae60; font-weight:bold;">🟢</span>')
         body = body.replace('🔴', '<span style="color:#c0392b; font-weight:bold;">🔴</span>')
         body = body.replace('🚀', '<span style="color:#8e44ad; font-weight:bold;">🚀</span>')
-        body = body.replace('💼', '<span style="color:#2980b9; font-weight:bold;">💼</span>')
-        body = body.replace('🔹', '<span style="color:#3498db; font-weight:bold;">🔹</span>')
 
     to_email = os.environ.get("MAIL_TO")
     from_email = os.environ.get("MAIL_USER")
@@ -325,5 +360,4 @@ if __name__ == "__main__":
     else:
         print("\n=== 🎯 本地終端機預覽 ===")
         print(fetch_status_msg)
-        if target_df.empty: print("目前沒有符合條件的標的。")
-        else: print(target_df.to_markdown(index=False))
+        if not target_df.empty: print(target_df.to_markdown(index=False))
