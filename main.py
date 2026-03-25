@@ -19,9 +19,8 @@ warnings.filterwarnings('ignore')
 MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
 
 # ==========================================
-# 網路連線設定 (偽裝成真人瀏覽器，突破 GitHub IP 限制)
+# 網路連線設定 (偽裝成真人瀏覽器)
 # ==========================================
-# 建立一個全域的 requests Session，所有的抓取都透過這個「假瀏覽器」進行
 REQ_SESSION = requests.Session()
 REQ_SESSION.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -30,12 +29,11 @@ REQ_SESSION.headers.update({
 })
 
 # ==========================================
-# 新增：三層瀑布流新聞抓取模組 (終極防擋機制)
+# 三層瀑布流新聞抓取模組
 # ==========================================
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
     
-    # [第一層] 嘗試 yfinance 原生 API (最高品質)
     try:
         news = ticker_obj.news
         if news and len(news) > 0:
@@ -45,7 +43,6 @@ def get_robust_news(ticker_obj, ticker_symbol):
             if news_items: return news_items
     except: pass
 
-    # [第二層] 嘗試 Yahoo Finance 隱藏版 RSS (原生新聞)
     try:
         url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker_symbol}&region=US&lang=en-US"
         response = REQ_SESSION.get(url, timeout=5)
@@ -58,7 +55,6 @@ def get_robust_news(ticker_obj, ticker_symbol):
             if news_items: return news_items
     except: pass
 
-    # [第三層] 嘗試 Google News RSS (最強備援)
     try:
         query = urllib.parse.quote(f"{ticker_symbol} stock")
         url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
@@ -72,7 +68,7 @@ def get_robust_news(ticker_obj, ticker_symbol):
             if news_items: return news_items
     except: pass
 
-    return [] # 三層都失敗才回傳空值
+    return [] 
 
 # ==========================================
 # 動態抓取 Nasdaq 100
@@ -91,7 +87,7 @@ def get_nasdaq_100_tickers():
     return ['AAPL'], "⚠️ 發生未知錯誤"
 
 # ==========================================
-# 模組化：數據驗證與基本面抓取
+# 數據驗證與基本面抓取
 # ==========================================
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     score = 50
@@ -116,7 +112,6 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
         bull_keywords = ['upgrade', 'beat', 'growth', 'surge', 'buy', 'higher', 'record']
         bear_keywords = ['downgrade', 'miss', 'cut', 'drop', 'lawsuit', 'sell', 'lower', 'weak']
         
-        # 呼叫三層瀑布流抓新聞
         news_list_raw = get_robust_news(ticker_obj, ticker_symbol)
             
         if news_list_raw:
@@ -138,11 +133,11 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
 
         return max(0, min(100, score)), latest_news_str
     except Exception as e:
-        print(f"[{ticker_symbol}] 評分系統錯誤: {e}")
+        print(f"[{ticker_symbol}] 基本面/新聞抓取異常: {e}")
         return 50, "數據抓取異常"
 
 # ==========================================
-# 模組化：期權策略建議 
+# 期權策略建議 
 # ==========================================
 def get_investment_strategy(ticker_obj, current_price, score, signal_type):
     if signal_type == "超跌反彈":
@@ -191,9 +186,12 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type):
 def scan_market_opportunities(tickers_list, portfolio_list):
     all_tickers = list(set(tickers_list + portfolio_list))
     
-    df_data = yf.download(all_tickers, period="3mo", progress=False)
+    print(f"開始下載 {len(all_tickers)} 檔股票歷史股價...")
+    # ✨ 關鍵修復：這裡加上了 session=REQ_SESSION，突破 Yahoo 對批次下載的阻擋
+    df_data = yf.download(all_tickers, period="3mo", progress=False, session=REQ_SESSION)
+    
     if df_data.empty:
-        print("❌ 歷史股價下載完全失敗！")
+        print("❌ 歷史股價下載完全失敗！(可能被 Yahoo 阻擋)")
         return pd.DataFrame()
         
     df_closes = df_data['Close'].dropna(axis=1, how='all')
@@ -202,10 +200,10 @@ def scan_market_opportunities(tickers_list, portfolio_list):
     results = []
     
     for ticker in df_closes.columns:
-        close_prices = df_closes[ticker].dropna()
-        if len(close_prices) < 20: continue 
-            
         try:
+            close_prices = df_closes[ticker].dropna()
+            if len(close_prices) < 20: continue 
+                
             delta = close_prices.diff()
             gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
             loss = -delta.clip(upper=0).ewm(alpha=1/14, adjust=False).mean()
@@ -219,10 +217,14 @@ def scan_market_opportunities(tickers_list, portfolio_list):
             latest_price = close_prices.iloc[-1]
             bias_20 = ((latest_price - ma20.iloc[-1]) / ma20.iloc[-1]) * 100
             
+            # 優化成交量防呆，避免 NaN 錯誤
             volumes = df_volumes[ticker].dropna()
-            vol_ma20 = volumes.rolling(window=20).mean().iloc[-1]
-            latest_vol = volumes.iloc[-1]
-            vol_surge = latest_vol > vol_ma20 * 1.2 
+            vol_surge = False
+            if len(volumes) >= 20:
+                vol_ma20 = volumes.rolling(window=20).mean().iloc[-1]
+                latest_vol = volumes.iloc[-1]
+                if pd.notna(vol_ma20) and vol_ma20 > 0:
+                    vol_surge = latest_vol > vol_ma20 * 1.2 
             
             signal_type = None
             if latest_rsi < 35 and bias_20 < -6: signal_type = "超跌反彈"
@@ -233,7 +235,6 @@ def scan_market_opportunities(tickers_list, portfolio_list):
                 
             if signal_type:
                 print(f"分析中: {ticker} ({signal_type})...")
-                # ✨ 關鍵點：在這裡套用我們建構好的「偽裝 Session」給 yfinance
                 stock_obj = yf.Ticker(ticker, session=REQ_SESSION)
                 fund_score, latest_news = get_fundamental_sentiment_score(stock_obj, ticker)
                 strategy = get_investment_strategy(stock_obj, latest_price, fund_score, signal_type)
@@ -250,6 +251,8 @@ def scan_market_opportunities(tickers_list, portfolio_list):
                 }
                 results.append(stock_data)
         except Exception as e:
+            # ✨ 新增：印出個別股票錯誤原因，方便後續 Debug
+            print(f"❌ [{ticker}] 計算過程發生錯誤: {e}")
             continue
 
     return pd.DataFrame(results)
@@ -295,7 +298,8 @@ if __name__ == "__main__":
     status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 已載入持倉股票監控：{', '.join(MY_PORTFOLIO)}</div>"
     
     if target_df.empty:
-        body = f"{status_html}<h3>今日掃描結果</h3><p>系統無回傳任何資料，請檢查日誌。</p>"
+        # 修改提示詞，讓信件內容更清楚知道是沒抓到資料還是沒有達標
+        body = f"{status_html}<h3>今日掃描結果</h3><p>歷史股價下載失敗，或今日無任何股票符合極端策略條件。<br>請登入 GitHub Actions 查看詳細執行日誌 (Logs)。</p>"
     else:
         target_df = target_df.sort_values(by=['身份', '型態', '基本面評分'], ascending=[False, False, False])
         pd.set_option('display.max_colwidth', None)
