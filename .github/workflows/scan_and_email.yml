@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install yfinance pandas requests lxml html5lib
+          pip install yfinance pandas requests lxml html5lib curl_cffi
           
       - name: Run stock scan and email
         run: python main.py
