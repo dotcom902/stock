@@ -188,7 +188,7 @@ def scan_market_opportunities(tickers_list, portfolio_list):
     
     print(f"開始下載 {len(all_tickers)} 檔股票歷史股價...")
     # ✨ 關鍵修復：這裡加上了 session=REQ_SESSION，突破 Yahoo 對批次下載的阻擋
-    df_data = yf.download(all_tickers, period="3mo", progress=False, session=REQ_SESSION)
+    df_data = yf.download(all_tickers, period="3mo", progress=False)
     
     if df_data.empty:
         print("❌ 歷史股價下載完全失敗！(可能被 Yahoo 阻擋)")
@@ -235,7 +235,7 @@ def scan_market_opportunities(tickers_list, portfolio_list):
                 
             if signal_type:
                 print(f"分析中: {ticker} ({signal_type})...")
-                stock_obj = yf.Ticker(ticker, session=REQ_SESSION)
+                stock_obj = yf.Ticker(ticker)
                 fund_score, latest_news = get_fundamental_sentiment_score(stock_obj, ticker)
                 strategy = get_investment_strategy(stock_obj, latest_price, fund_score, signal_type)
                 
