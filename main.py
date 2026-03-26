@@ -12,6 +12,7 @@ import urllib.parse
 import time  
 import json
 import base64  
+import requests  # ✨ 修復：加回標準版的 requests 套件
 from google import genai  
 from curl_cffi import requests as cffi_requests
 
@@ -128,14 +129,12 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
                 contents=prompt
             )
             
-            # ✨ 預設調高到 8 秒，讓整體 API 呼叫更平緩
             print(f"[{ticker}] AI 分析完成，冷卻 8 秒以保護免費額度...")
             time.sleep(8) 
             return response.text.replace('\n', '<br>')
             
         except Exception as e:
             error_msg = str(e)
-            # ✨ 核心升級：抓到 429 錯誤時，強制睡 35 秒再試，絕不輕易放棄
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "Quota" in error_msg:
                 wait_time = 35 + (attempt * 10) 
                 print(f"[{ticker}] 觸發免費額度限制 (429)，自動暫停 {wait_time} 秒後重試 (第 {attempt+1} 次)...")
