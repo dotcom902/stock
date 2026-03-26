@@ -8,17 +8,17 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import xml.etree.ElementTree as ET
-import requests
 import urllib.parse
 import time  
 import json
-import base64  # ✨ 新增：用來解碼網址，防止編輯器破壞格式
+import base64  
 from google import genai  
+from curl_cffi import requests as cffi_requests
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 🛡️ 網址防護函數 (防止複製貼上時被轉成超連結)
+# 🛡️ 網址防護函數
 # ==========================================
 def get_safe_url(b64_str):
     return base64.b64decode(b64_str).decode('utf-8')
@@ -45,9 +45,9 @@ REQ_SESSION.headers.update({
 })
 
 # ==========================================
-# 🤖 AI 動態板塊尋標器 (Sector Rotation)
+# 🤖 AI 動態板塊尋標器 (具備自動重試機制)
 # ==========================================
-def get_ai_dynamic_sectors():
+def get_ai_dynamic_sectors(max_retries=2):
     fallback_tickers = ['RKLB', 'ASTS', 'BKSY', 'LITE', 'COHR', 'AMD', 'ARM', 'SMCI', 'MARA']
     fallback_desc = "太空, 矽光子, AI伺服器 (備用預設)"
 
@@ -65,32 +65,41 @@ def get_ai_dynamic_sectors():
       "tickers": ["代碼1", "代碼2", "代碼3", "代碼4", "代碼5"]
     }}
     """
-    try:
-        print("🧠 正在請 AI 偵測今日市場最熱門的 3 大板塊...")
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        
-        cleaned_text = response.text.replace('```json', '').replace('```', '').strip()
-        data = json.loads(cleaned_text)
-        
-        hot_tickers = [ticker.strip().upper() for ticker in data.get("tickers", fallback_tickers)]
-        hot_sectors_desc = data.get("sector_names", fallback_desc)
-        
-        print(f"🔥 AI 動態精選板塊: {hot_sectors_desc}")
-        print(f"🔥 選出標的: {hot_tickers}")
-        
-        time.sleep(3) 
-        return hot_tickers, hot_sectors_desc
-    except Exception as e:
-        print(f"⚠️ AI 獲取動態板塊失敗 ({e})，使用備用清單。")
-        return fallback_tickers, fallback_desc
+    
+    for attempt in range(max_retries):
+        try:
+            print("🧠 正在請 AI 偵測今日市場最熱門的 3 大板塊...")
+            response = ai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt
+            )
+            
+            cleaned_text = response.text.replace('```json', '').replace('```', '').strip()
+            data = json.loads(cleaned_text)
+            
+            hot_tickers = [ticker.strip().upper() for ticker in data.get("tickers", fallback_tickers)]
+            hot_sectors_desc = data.get("sector_names", fallback_desc)
+            
+            print(f"🔥 AI 動態精選板塊: {hot_sectors_desc}")
+            print(f"🔥 選出標的: {hot_tickers}")
+            
+            time.sleep(3) 
+            return hot_tickers, hot_sectors_desc
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                print(f"⚠️ 獲取板塊觸發 API 流量限制，等待 30 秒後重試...")
+                time.sleep(30)
+            else:
+                print(f"⚠️ AI 獲取動態板塊失敗 ({e})，使用備用清單。")
+                return fallback_tickers, fallback_desc
+                
+    return fallback_tickers, fallback_desc
 
 # ==========================================
-# 🤖 AI 自動化審查代理 (積極進攻版 Prompt)
+# 🤖 AI 自動化審查代理 (✨ 加入智慧防禦重試機制)
 # ==========================================
-def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
+def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=3):
     if not ai_client: return "⚠️ 未設定 API Key"
     if not news_list_raw: return "無足夠新聞資訊"
     
@@ -112,23 +121,34 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
     請將字數嚴格限制在 50 個中文字以內，直接輸出。
     """
     
-    try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        
-        print(f"[{ticker}] AI 分析完成，冷卻 6 秒以保護免費額度...")
-        time.sleep(6) 
-        
-        return response.text.replace('\n', '<br>')
-    except Exception as e:
-        print(f"[{ticker}] AI 分析失敗: {e}")
-        time.sleep(6) 
-        return "AI 伺服器忙線中"
+    for attempt in range(max_retries):
+        try:
+            response = ai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt
+            )
+            
+            # ✨ 預設調高到 8 秒，讓整體 API 呼叫更平緩
+            print(f"[{ticker}] AI 分析完成，冷卻 8 秒以保護免費額度...")
+            time.sleep(8) 
+            return response.text.replace('\n', '<br>')
+            
+        except Exception as e:
+            error_msg = str(e)
+            # ✨ 核心升級：抓到 429 錯誤時，強制睡 35 秒再試，絕不輕易放棄
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "Quota" in error_msg:
+                wait_time = 35 + (attempt * 10) 
+                print(f"[{ticker}] 觸發免費額度限制 (429)，自動暫停 {wait_time} 秒後重試 (第 {attempt+1} 次)...")
+                time.sleep(wait_time)
+            else:
+                print(f"[{ticker}] AI 分析失敗: {e}")
+                time.sleep(5) 
+                return "AI 伺服器忙線中"
+                
+    return "⚠️ API 流量限制，請稍後再試"
 
 # ==========================================
-# 三層瀑布流新聞抓取模組 (結合 Base64 網址防護)
+# 🏆 三層瀑布流新聞抓取模組 (結合 Base64 網址防護)
 # ==========================================
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
@@ -141,30 +161,30 @@ def get_robust_news(ticker_obj, ticker_symbol):
     except: pass
 
     try:
-        # 解碼 Google News 網址基底
         base_url = get_safe_url('aHR0cHM6Ly9uZXdzLmdvb2dsZS5jb20vcnNzL3NlYXJjaD9xPQ==')
         query = urllib.parse.quote(f"{ticker_symbol} stock")
         url = f"{base_url}{query}&hl=en-US&gl=US&ceid=US:en"
         
-        response = REQ_SESSION.get(url, timeout=5)
+        response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
         if response.status_code == 200:
-            root = ET.fromstring(response.content)
+            root = ET.fromstring(response.text)
             for item in root.findall('.//channel/item')[:5]:
                 title_elem = item.find('title')
-                if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Google News'})
+                if title_elem is not None:
+                    clean_title = title_elem.text.split(' - ')[0]
+                    news_items.append({'title': clean_title, 'publisher': 'Google News'})
             if news_items: 
-                time.sleep(1) # 小歇一下防封鎖
+                time.sleep(1) 
                 return news_items
     except: pass
 
     try:
-        # 解碼 Yahoo RSS 網址基底
         base_url = get_safe_url('aHR0cHM6Ly9mZWVkcy5maW5hbmNlLnlhaG9vLmNvbS9yc3MvMi4wL2hlYWRsaW5lP3M9')
         url = f"{base_url}{ticker_symbol}&region=US&lang=en-US"
         
-        response = REQ_SESSION.get(url, timeout=5)
+        response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
         if response.status_code == 200:
-            root = ET.fromstring(response.content)
+            root = ET.fromstring(response.text)
             for item in root.findall('.//item')[:5]:
                 title_elem = item.find('title')
                 if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Yahoo RSS'})
@@ -178,10 +198,10 @@ def get_robust_news(ticker_obj, ticker_symbol):
 def get_nasdaq_100_tickers():
     print("正在獲取 Nasdaq 100 成分股...")
     try:
-        # 解碼 Wikipedia 網址，徹底防止被轉成 Markdown 超連結
         url = get_safe_url('aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvTmFzZGFxLTEwMA==')
-        html_content = REQ_SESSION.get(url, timeout=10).text
-        tables = pd.read_html(html_content)
+        response = cffi_requests.get(url, impersonate="chrome110", timeout=15)
+        tables = pd.read_html(response.text)
+        
         for table in tables:
             if 'Ticker' in table.columns: return table['Ticker'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
             elif 'Symbol' in table.columns: return table['Symbol'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
