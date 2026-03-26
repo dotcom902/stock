@@ -10,8 +10,9 @@ from email.mime.text import MIMEText
 import xml.etree.ElementTree as ET
 import requests
 import urllib.parse
+import urllib.request
 import time  
-import json  # ✨ 新增：用來解析 AI 傳回來的動態清單
+import json  
 from google import genai  
 
 warnings.filterwarnings('ignore')
@@ -41,8 +42,6 @@ REQ_SESSION.headers.update({
 # 🤖 AI 動態板塊尋標器 (Sector Rotation)
 # ==========================================
 def get_ai_dynamic_sectors():
-    """讓 AI 每天自動選出市場最熱門的 3 個板塊，並回傳股票清單"""
-    # 如果沒有 AI 金鑰，使用備用清單防呆
     fallback_tickers = ['RKLB', 'ASTS', 'BKSY', 'LITE', 'COHR', 'AMD', 'ARM', 'SMCI', 'MARA']
     fallback_desc = "太空, 矽光子, AI伺服器 (備用預設)"
 
@@ -68,7 +67,6 @@ def get_ai_dynamic_sectors():
             contents=prompt
         )
         
-        # 清理字串並解析 JSON
         cleaned_text = response.text.replace('```json', '').replace('```', '').strip()
         data = json.loads(cleaned_text)
         
@@ -78,7 +76,7 @@ def get_ai_dynamic_sectors():
         print(f"🔥 AI 動態精選板塊: {hot_sectors_desc}")
         print(f"🔥 選出標的: {hot_tickers}")
         
-        time.sleep(3) # 稍微冷卻一下保護 API 額度
+        time.sleep(3) 
         return hot_tickers, hot_sectors_desc
     except Exception as e:
         print(f"⚠️ AI 獲取動態板塊失敗 ({e})，使用備用清單。")
@@ -125,10 +123,12 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
         return "AI 伺服器忙線中"
 
 # ==========================================
-# 三層瀑布流新聞抓取模組
+# 🏆 強化版：三層瀑布流新聞抓取模組 (突破阻擋)
 # ==========================================
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
+    
+    # 1. 嘗試 yfinance 原生 API (最快但容易失效)
     try:
         news = ticker_obj.news
         if news and len(news) > 0:
@@ -137,33 +137,37 @@ def get_robust_news(ticker_obj, ticker_symbol):
             if news_items: return news_items
     except: pass
 
-    try:
-        url = f"[https://feeds.finance.yahoo.com/rss/2.0/headline?s=](https://feeds.finance.yahoo.com/rss/2.0/headline?s=){ticker_symbol}&region=US&lang=en-US"
-        response = REQ_SESSION.get(url, timeout=5)
-        if response.status_code == 200:
-            root = ET.fromstring(response.content)
-            for item in root.findall('.//item')[:5]:
-                title_elem = item.find('title')
-                if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Yahoo RSS'})
-            if news_items: return news_items
-    except: pass
-
+    # 2. ✨ 核心升級：使用底層 urllib 偽裝成 Mac Safari 抓取 Google News (最強大的備援)
     try:
         query = urllib.parse.quote(f"{ticker_symbol} stock")
         url = f"[https://news.google.com/rss/search?q=](https://news.google.com/rss/search?q=){query}&hl=en-US&gl=US&ceid=US:en"
-        response = REQ_SESSION.get(url, timeout=5)
-        if response.status_code == 200:
-            root = ET.fromstring(response.content)
+        # 偽裝成真人瀏覽器
+        headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        req = urllib.request.Request(url, headers=headers)
+        
+        with urllib.request.urlopen(req, timeout=5) as response:
+            xml_data = response.read()
+            root = ET.fromstring(xml_data)
             for item in root.findall('.//channel/item')[:5]:
                 title_elem = item.find('title')
-                if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Google News'})
+                if title_elem is not None:
+                    # 去除標題後面的 "- Yahoo Finance" 等來源字樣，讓 AI 閱讀更乾淨
+                    clean_title = title_elem.text.split(' - ')[0]
+                    news_items.append({'title': clean_title, 'publisher': 'Google News'})
             if news_items: return news_items
-    except: pass
+    except Exception as e: 
+        print(f"[{ticker_symbol}] Google News 抓取異常: {e}")
+        pass
+
     return [] 
 
+# ==========================================
+# ✨ 修復網址：動態抓取 Nasdaq 100
+# ==========================================
 def get_nasdaq_100_tickers():
     print("正在獲取 Nasdaq 100 成分股...")
     try:
+        # 確保網址是純文字，沒有 Markdown 括號
         url = '[https://en.wikipedia.org/wiki/Nasdaq-100](https://en.wikipedia.org/wiki/Nasdaq-100)'
         html_content = REQ_SESSION.get(url, timeout=10).text
         tables = pd.read_html(html_content)
@@ -171,7 +175,7 @@ def get_nasdaq_100_tickers():
             if 'Ticker' in table.columns: return table['Ticker'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
             elif 'Symbol' in table.columns: return table['Symbol'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
     except Exception as e:
-        return ['AAPL', 'MSFT'], f"⚠️ 抓取失敗，使用備用清單 ({e})"
+        return ['AAPL', 'MSFT'], f"⚠️ 維基百科抓取失敗，使用備用清單 ({e})"
     return ['AAPL'], "⚠️ 發生未知錯誤"
 
 # ==========================================
@@ -406,18 +410,13 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
         print(f"❌ 寄信失敗: {e}")
 
 if __name__ == "__main__":
-    # 1. 抓取納斯達克 100
     ndx_tickers, fetch_status_msg = get_nasdaq_100_tickers()
-    
-    # 2. ✨ 核心升級：讓 AI 動態抓取今天最熱門的 3 個板塊與對應標的
     dynamic_hot_sectors, hot_sectors_desc = get_ai_dynamic_sectors()
     
-    # 3. 將持倉、納斯達克、動態熱門板塊一起丟入雷達掃描
     target_df = scan_market_opportunities(ndx_tickers, MY_PORTFOLIO, dynamic_hot_sectors)
     
     subject = f"🧠 量化早報：AI 動態板塊尋標與防護 ({datetime.today().strftime('%Y-%m-%d')})"
     
-    # 在信件最上方顯示 AI 今天挑選了哪些熱門板塊
     status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🔥 AI 動態板塊鎖定：<b>{hot_sectors_desc}</b> ({len(dynamic_hot_sectors)} 檔標的)</div>"
     
     if target_df.empty:
