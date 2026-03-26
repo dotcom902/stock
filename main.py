@@ -8,12 +8,12 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import xml.etree.ElementTree as ET
-import requests
 import urllib.parse
-import urllib.request
 import time  
 import json  
 from google import genai  
+# ✨ 終極升級：使用 curl_cffi 完美偽裝成真實瀏覽器，突破所有 IP 封鎖！
+from curl_cffi import requests as cffi_requests
 
 warnings.filterwarnings('ignore')
 
@@ -29,14 +29,6 @@ if GEMINI_API_KEY:
 # 參數設定區 (持倉)
 # ==========================================
 MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
-
-# ==========================================
-# 網路連線設定
-# ==========================================
-REQ_SESSION = requests.Session()
-REQ_SESSION.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-})
 
 # ==========================================
 # 🤖 AI 動態板塊尋標器 (Sector Rotation)
@@ -123,12 +115,12 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
         return "AI 伺服器忙線中"
 
 # ==========================================
-# 🏆 強化版：三層瀑布流新聞抓取模組 (突破阻擋)
+# 🏆 終極破甲版：三層瀑布流新聞抓取模組
 # ==========================================
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
     
-    # 1. 嘗試 yfinance 原生 API (最快)
+    # 1. 嘗試 yfinance 原生 API
     try:
         news = ticker_obj.news
         if news and len(news) > 0:
@@ -137,32 +129,34 @@ def get_robust_news(ticker_obj, ticker_symbol):
             if news_items: return news_items
     except: pass
 
-    # 2. ✨ 核心升級：使用我們偽裝好的 REQ_SESSION 抓取 Google News，並加入延遲防封鎖
+    # 2. ✨ 核心升級：使用 curl_cffi 完美偽裝成 Chrome 110，突破 GitHub IP 封鎖
     try:
         query = urllib.parse.quote(f"{ticker_symbol} stock")
         url = f"[https://news.google.com/rss/search?q=](https://news.google.com/rss/search?q=){query}&hl=en-US&gl=US&ceid=US:en"
         
-        response = REQ_SESSION.get(url, timeout=5)
+        # impersonate="chrome110" 是突破封鎖的魔法
+        response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
+        
         if response.status_code == 200:
-            root = ET.fromstring(response.content)
+            root = ET.fromstring(response.text)
             for item in root.findall('.//channel/item')[:5]:
                 title_elem = item.find('title')
                 if title_elem is not None:
                     clean_title = title_elem.text.split(' - ')[0]
                     news_items.append({'title': clean_title, 'publisher': 'Google News'})
             if news_items: 
-                time.sleep(1) # ✨ 稍微停頓 1 秒，避免連續請求被 Google 封鎖
+                time.sleep(1) # 防禦性延遲
                 return news_items
     except Exception as e: 
         print(f"[{ticker_symbol}] Google News 抓取異常: {e}")
         pass
 
-    # 3. 嘗試 Yahoo RSS (最後備援)
+    # 3. 嘗試 Yahoo RSS (搭配 curl_cffi)
     try:
         url = f"[https://feeds.finance.yahoo.com/rss/2.0/headline?s=](https://feeds.finance.yahoo.com/rss/2.0/headline?s=){ticker_symbol}&region=US&lang=en-US"
-        response = REQ_SESSION.get(url, timeout=5)
+        response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
         if response.status_code == 200:
-            root = ET.fromstring(response.content)
+            root = ET.fromstring(response.text)
             for item in root.findall('.//item')[:5]:
                 title_elem = item.find('title')
                 if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Yahoo RSS'})
@@ -177,10 +171,13 @@ def get_robust_news(ticker_obj, ticker_symbol):
 def get_nasdaq_100_tickers():
     print("正在獲取 Nasdaq 100 成分股...")
     try:
-        # ⚠️ 關鍵修復：這裡必須是純字串，絕對不能有 [ ] 或 ( )
-        url = '[https://en.wikipedia.org/wiki/Nasdaq-100](https://en.wikipedia.org/wiki/Nasdaq-100)'
-        html_content = REQ_SESSION.get(url, timeout=10).text
-        tables = pd.read_html(html_content)
+        # ⚠️ 魔法防護：用字串拼接，防止編輯器雞婆幫你轉成 Markdown 超連結！
+        url = '[https://en.wiki](https://en.wiki)' + 'pedia.org/wiki/Nasdaq-100'
+        
+        # 同樣使用 curl_cffi 突破維基百科的機器人阻擋
+        response = cffi_requests.get(url, impersonate="chrome110", timeout=15)
+        tables = pd.read_html(response.text)
+        
         for table in tables:
             if 'Ticker' in table.columns: return table['Ticker'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
             elif 'Symbol' in table.columns: return table['Symbol'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
