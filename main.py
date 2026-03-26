@@ -10,33 +10,34 @@ from email.mime.text import MIMEText
 import xml.etree.ElementTree as ET
 import requests
 import urllib.parse
-import time  # ✨ 新增：用於控制 API 呼叫頻率
-import google.generativeai as genai  # ✨ 新增：Google Gemini AI 套件
+import time  
+# ✨ 關鍵升級：匯入全新的 Google GenAI 官方套件
+from google import genai  
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# API 金鑰與 AI 模型設定
+# API 金鑰與 AI 模型設定 (全新寫法)
 # ==========================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+ai_client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ==========================================
-# 參數設定區 (強勢板塊與持倉)
+# 參數設定區 (加入你的專屬強勢板塊與持倉)
 # ==========================================
 MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
 
 HOT_SECTORS = [
-    'RKLB', 'ASTS', 'BKSY', 'SIDU', 'PLTR', # 太空與國防大數據
-    'LITE', 'COHR', 'FN', 'LUMN',           # 光通訊 (矽光子)
-    'AMD', 'MU', 'ARM', 'SNDK',             # 半導體與AI伺服器
-    'ONDS', 'SERV', 'SYM'                   # 自動化與機器人
-    'MARA', 'IREN', 'COIN','CRCL'                   # 加密貨幣
+    'RKLB', 'ASTS', 'BKSY', 'SIDU', 'PLTR', 
+    'LITE', 'COHR', 'FN', 'LUMN',           
+    'AMD', 'MU', 'ARM', 'SMCI',             
+    'ONDS', 'SERV', 'SYM', 'MARA' # ✨ 已修復：補上逗號，避免變成 SYMMARA
 ]
 
 # ==========================================
-# 網路連線設定 (保留給新聞與維基百科)
+# 網路連線設定 (偽裝成真人瀏覽器)
 # ==========================================
 REQ_SESSION = requests.Session()
 REQ_SESSION.headers.update({
@@ -44,11 +45,10 @@ REQ_SESSION.headers.update({
 })
 
 # ==========================================
-# 🤖 AI 自動化審查代理 (Agent) - 嚴格遵守免費額度
+# 🤖 AI 自動化審查代理 (全面升級版)
 # ==========================================
 def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
-    # 如果沒有設定 API Key 或抓不到新聞，就跳過分析
-    if not GEMINI_API_KEY: return "⚠️ 未設定 API Key"
+    if not ai_client: return "⚠️ 未設定 API Key"
     if not news_list_raw: return "無足夠新聞資訊"
     
     news_text = "\n".join([f"- {item.get('title', '')}" for item in news_list_raw[:5]])
@@ -68,17 +68,19 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
     """
     
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
+        # ✨ 關鍵升級：使用最新語法與最新的 gemini-2.5-flash 引擎
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
         
-        # ✨ 關鍵防護：每次呼叫完 AI 強制暫停 4.5 秒，確保不會超過每分鐘 15 次的免費限制
-        print(f"[{ticker}] AI 分析完成，冷卻 4.5 秒以保護免費額度...")
-        time.sleep(4.5) 
+        print(f"[{ticker}] AI 分析完成，冷卻 6 秒以保護免費額度...")
+        time.sleep(6) 
         
         return response.text.replace('\n', '<br>')
     except Exception as e:
         print(f"[{ticker}] AI 分析失敗: {e}")
-        time.sleep(4.5) # 發生錯誤也冷卻，避免狂打 API 被 ban
+        time.sleep(6) 
         return "AI 伺服器忙線中"
 
 # ==========================================
@@ -132,14 +134,14 @@ def get_nasdaq_100_tickers():
     return ['AAPL'], "⚠️ 發生未知錯誤"
 
 # ==========================================
-# 數據驗證與基本面抓取 (回傳原始新聞陣列給 AI 備用)
+# 數據驗證與基本面抓取
 # ==========================================
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     score = 50
     latest_news_str = "無最新新聞" 
     sector = "未知板塊"
     days_to_earnings = "未知"
-    news_list_raw = [] # 新增：用來存放傳給 AI 的原始新聞資料
+    news_list_raw = [] 
 
     try:
         info = ticker_obj.info
@@ -243,7 +245,7 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
     
     print(f"開始下載 {len(all_tickers)} 檔股票歷史股價...")
-    df_data = yf.download(all_tickers, period="3mo", progress=False) # 依然不帶 session 給 yfinance 官方
+    df_data = yf.download(all_tickers, period="3mo", progress=False) 
     
     if df_data.empty: return pd.DataFrame()
         
@@ -293,14 +295,13 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
                 print(f"\n➤ 發現異動: {ticker} ({signal_type})... 準備提取資料與 AI 分析")
                 stock_obj = yf.Ticker(ticker)
                 
-                # 取得所有基本面資訊以及原始新聞 (給 AI 閱讀用)
                 fund_score, latest_news, sector, days_to_earnings, news_list_raw = get_fundamental_sentiment_score(stock_obj, ticker)
                 strategy = get_investment_strategy(stock_obj, latest_price, fund_score, signal_type, days_to_earnings)
                 
                 if signal_type == "持倉監控":
                     strategy['綜合建議'] = "🔹 日常追蹤" if fund_score >= 50 else "⚠️ 基本面弱化，留意停損"
 
-                # ✨ 呼叫 AI 進行深度判斷 (自帶 4.5 秒保護延遲)
+                # 呼叫 AI 進行深度判斷
                 ai_verdict = analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw)
 
                 identity = '🔍 掃描發現'
@@ -321,7 +322,7 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
                     '期權履約價': strategy['期權履約價'],
                     '年化報酬': strategy['年化報酬'], 
                     '最新新聞': latest_news,
-                    '🤖 AI 投研觀點': ai_verdict # ✨ 最終 AI 分析結果
+                    '🤖 AI 投研觀點': ai_verdict
                 }
                 results.append(stock_data)
         except Exception as e:
@@ -338,7 +339,6 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
     msg['To'] = to_email
     msg['Subject'] = subject
     
-    # CSS 微調，確保 AI 觀點欄位有足夠的寬度顯示
     html_style = """
     <style>
         body { font-family: 'Segoe UI', Arial, sans-serif; color: #2c3e50; }
@@ -347,8 +347,8 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
         th { background-color: #2c3e50; color: white; padding: 10px 5px; text-align: center; }
         td { border: 1px solid #bdc3c7; padding: 8px 5px; text-align: center; word-wrap: break-word; vertical-align: middle; }
         tr:nth-child(even) { background-color: #f8f9fa; }
-        th:nth-last-child(2) { width: 18%; } /* 新聞欄位寬度 */
-        th:last-child { width: 18%; background-color: #8e44ad; } /* AI 觀點欄位特別標示 */
+        th:nth-last-child(2) { width: 18%; } 
+        th:last-child { width: 18%; background-color: #8e44ad; } 
         td:nth-last-child(2), td:last-child { text-align: left; font-size: 11px; color: #34495e; line-height: 1.4; }
         .high-rvol { color: #e74c3c; font-weight: bold; }
     </style>
@@ -370,7 +370,7 @@ if __name__ == "__main__":
     target_df = scan_market_opportunities(ndx_tickers, MY_PORTFOLIO, HOT_SECTORS)
     
     subject = f"🧠 量化早報：多板塊熱力掃描與 AI 觀點 ({datetime.today().strftime('%Y-%m-%d')})"
-    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 | 🔥 熱門板塊池：{len(HOT_SECTORS)} 檔<br>🤖 AI Agent 已啟用 (嚴格遵守免費額度)</div>"
+    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 | 🔥 熱門板塊池：{len(HOT_SECTORS)} 檔<br>🤖 AI Agent 已升級為 Gemini 2.5 引擎</div>"
     
     if target_df.empty:
         body = f"{status_html}<h3>今日無符合條件標的</h3>"
