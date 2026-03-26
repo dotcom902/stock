@@ -128,7 +128,7 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
     
-    # 1. 嘗試 yfinance 原生 API (最快但容易失效)
+    # 1. 嘗試 yfinance 原生 API (最快)
     try:
         news = ticker_obj.news
         if news and len(news) > 0:
@@ -137,27 +137,37 @@ def get_robust_news(ticker_obj, ticker_symbol):
             if news_items: return news_items
     except: pass
 
-    # 2. ✨ 核心升級：使用底層 urllib 偽裝成 Mac Safari 抓取 Google News (最強大的備援)
+    # 2. ✨ 核心升級：使用我們偽裝好的 REQ_SESSION 抓取 Google News，並加入延遲防封鎖
     try:
         query = urllib.parse.quote(f"{ticker_symbol} stock")
         url = f"[https://news.google.com/rss/search?q=](https://news.google.com/rss/search?q=){query}&hl=en-US&gl=US&ceid=US:en"
-        # 偽裝成真人瀏覽器
-        headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        req = urllib.request.Request(url, headers=headers)
         
-        with urllib.request.urlopen(req, timeout=5) as response:
-            xml_data = response.read()
-            root = ET.fromstring(xml_data)
+        response = REQ_SESSION.get(url, timeout=5)
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
             for item in root.findall('.//channel/item')[:5]:
                 title_elem = item.find('title')
                 if title_elem is not None:
-                    # 去除標題後面的 "- Yahoo Finance" 等來源字樣，讓 AI 閱讀更乾淨
                     clean_title = title_elem.text.split(' - ')[0]
                     news_items.append({'title': clean_title, 'publisher': 'Google News'})
-            if news_items: return news_items
+            if news_items: 
+                time.sleep(1) # ✨ 稍微停頓 1 秒，避免連續請求被 Google 封鎖
+                return news_items
     except Exception as e: 
         print(f"[{ticker_symbol}] Google News 抓取異常: {e}")
         pass
+
+    # 3. 嘗試 Yahoo RSS (最後備援)
+    try:
+        url = f"[https://feeds.finance.yahoo.com/rss/2.0/headline?s=](https://feeds.finance.yahoo.com/rss/2.0/headline?s=){ticker_symbol}&region=US&lang=en-US"
+        response = REQ_SESSION.get(url, timeout=5)
+        if response.status_code == 200:
+            root = ET.fromstring(response.content)
+            for item in root.findall('.//item')[:5]:
+                title_elem = item.find('title')
+                if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Yahoo RSS'})
+            if news_items: return news_items
+    except: pass
 
     return [] 
 
@@ -167,7 +177,7 @@ def get_robust_news(ticker_obj, ticker_symbol):
 def get_nasdaq_100_tickers():
     print("正在獲取 Nasdaq 100 成分股...")
     try:
-        # 確保網址是純文字，沒有 Markdown 括號
+        # ⚠️ 關鍵修復：這裡必須是純字串，絕對不能有 [ ] 或 ( )
         url = '[https://en.wikipedia.org/wiki/Nasdaq-100](https://en.wikipedia.org/wiki/Nasdaq-100)'
         html_content = REQ_SESSION.get(url, timeout=10).text
         tables = pd.read_html(html_content)
