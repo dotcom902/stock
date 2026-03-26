@@ -10,15 +10,23 @@ from email.mime.text import MIMEText
 import xml.etree.ElementTree as ET
 import requests
 import urllib.parse
+import time  # ✨ 新增：用於控制 API 呼叫頻率
+import google.generativeai as genai  # ✨ 新增：Google Gemini AI 套件
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# 參數設定區 (加入你的專屬強勢板塊與持倉)
+# API 金鑰與 AI 模型設定
 # ==========================================
-MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR', 'SPY', 'QQQ', 'GDX'] 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# ✨ 新增：強勢板塊自選池 (太空、光通訊、半導體、AI機器人等)
+# ==========================================
+# 參數設定區 (強勢板塊與持倉)
+# ==========================================
+MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
+
 HOT_SECTORS = [
     'RKLB', 'ASTS', 'BKSY', 'SIDU', 'PLTR', # 太空與國防大數據
     'LITE', 'COHR', 'FN', 'LUMN',           # 光通訊 (矽光子)
@@ -27,12 +35,50 @@ HOT_SECTORS = [
 ]
 
 # ==========================================
-# 網路連線設定 (偽裝成真人瀏覽器)
+# 網路連線設定 (保留給新聞與維基百科)
 # ==========================================
 REQ_SESSION = requests.Session()
 REQ_SESSION.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 })
+
+# ==========================================
+# 🤖 AI 自動化審查代理 (Agent) - 嚴格遵守免費額度
+# ==========================================
+def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
+    # 如果沒有設定 API Key 或抓不到新聞，就跳過分析
+    if not GEMINI_API_KEY: return "⚠️ 未設定 API Key"
+    if not news_list_raw: return "無足夠新聞資訊"
+    
+    news_text = "\n".join([f"- {item.get('title', '')}" for item in news_list_raw[:5]])
+    
+    prompt = f"""
+    你是一位華爾街資深波段交易員與避險基金風險控制專家。
+    目前美股代號 {ticker} 觸發了「{signal_type}」的技術面訊號，且近期的成交量熱度為 {rvol} 倍。
+    
+    以下是該公司最新的催化劑新聞標題：
+    {news_text}
+
+    請依據以上資訊簡短分析：
+    1. 這是「結構性破壞（如掉單、假帳）」還是「情緒性錯殺/短期波動（如大盤拖累、短期降評、財報微幅不及預期）」？若是強勢突破，是因為什麼實質利多？
+    2. 給出你的最終結論：【可以建倉】或【高風險避開】。
+
+    請將字數嚴格限制在 50 個中文字以內，直接給出結論。
+    """
+    
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        
+        # ✨ 關鍵防護：每次呼叫完 AI 強制暫停 4.5 秒，確保不會超過每分鐘 15 次的免費限制
+        print(f"[{ticker}] AI 分析完成，冷卻 4.5 秒以保護免費額度...")
+        time.sleep(4.5) 
+        
+        return response.text.replace('\n', '<br>')
+    except Exception as e:
+        print(f"[{ticker}] AI 分析失敗: {e}")
+        time.sleep(4.5) # 發生錯誤也冷卻，避免狂打 API 被 ban
+        return "AI 伺服器忙線中"
 
 # ==========================================
 # 三層瀑布流新聞抓取模組
@@ -85,25 +131,23 @@ def get_nasdaq_100_tickers():
     return ['AAPL'], "⚠️ 發生未知錯誤"
 
 # ==========================================
-# 數據驗證與基本面/板塊抓取
+# 數據驗證與基本面抓取 (回傳原始新聞陣列給 AI 備用)
 # ==========================================
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     score = 50
     latest_news_str = "無最新新聞" 
     sector = "未知板塊"
     days_to_earnings = "未知"
+    news_list_raw = [] # 新增：用來存放傳給 AI 的原始新聞資料
 
     try:
         info = ticker_obj.info
         if not info: raise ValueError("無法獲取 info")
 
-        # ✨ 新增 1：獲取產業板塊
         sector = info.get('sector', '未知板塊')
         industry = info.get('industry', '')
         if industry: sector = f"{sector} ({industry})"
 
-        # ✨ 新增 2：計算距離下次財報天數 (避險用)
-        # Yahoo 的財報時間戳記有時會缺失，這裡做嚴格防呆
         earn_ts = info.get('earningsTimestamp')
         if earn_ts:
             earn_date = datetime.fromtimestamp(earn_ts)
@@ -114,7 +158,6 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
             else:
                 days_to_earnings = "近期已發布"
 
-        # 基本面評分計算
         current_price = info.get('currentPrice', 0)
         target_price = info.get('targetMeanPrice', 0)
         if current_price and target_price and current_price > 0 and target_price > 0:
@@ -145,12 +188,11 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
             score += news_score
             if news_display: latest_news_str = "<br><br>".join(news_display)
 
-        return max(0, min(100, score)), latest_news_str, sector, days_to_earnings
+        return max(0, min(100, score)), latest_news_str, sector, days_to_earnings, news_list_raw
     except Exception as e:
-        return 50, "數據抓取異常", "未知", "未知"
+        return 50, "數據抓取異常", "未知", "未知", []
 
 def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_to_earnings):
-    # 若財報將近，強制警告不要 Sell Put
     earnings_warning = "⚠️財報將近" in days_to_earnings
 
     if signal_type == "超跌反彈":
@@ -183,13 +225,13 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_
             annual_roc = (premium / (best_put['strike'] - premium)) * 100 * (365 / target_days)
             
             action = '🟢 積極 Sell Put / 買正股' if score >= 60 else '🟡 保守 Sell Put'
-            if earnings_warning: action = '🔴 避開期權(財報高風險)，僅小注正股'
+            if earnings_warning: action = '🔴 避開期權(財報高風險)'
 
             return {'綜合建議': action, '期權履約價': f"Put ${best_put['strike']} ({target_date})", '年化報酬': f"{round(annual_roc, 1)}%"}
         except: return {'綜合建議': '🟢 買入正股', '期權履約價': '-', '年化報酬': '-'}
             
     elif signal_type == "動能突破":
-        if score >= 65: return {'綜合建議': '🚀 順勢買入正股 / Buy Call', '期權履約價': '-', '年化報酬': '-'}
+        if score >= 65: return {'綜合建議': '🚀 順勢買正股 / Buy Call', '期權履約價': '-', '年化報酬': '-'}
         elif score < 40: return {'綜合建議': '⚠️ 估值過高，考慮獲利了結', '期權履約價': '-', '年化報酬': '-'}
         else: return {'綜合建議': '⚪ 持有觀望，設好移動停損', '期權履約價': '-', '年化報酬': '-'}
 
@@ -197,11 +239,10 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_
 # 主掃描函數 
 # ==========================================
 def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
-    # 將 Nasdaq 100、持倉、熱門板塊全部合併去重
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
     
     print(f"開始下載 {len(all_tickers)} 檔股票歷史股價...")
-    df_data = yf.download(all_tickers, period="3mo", progress=False)
+    df_data = yf.download(all_tickers, period="3mo", progress=False) # 依然不帶 session 給 yfinance 官方
     
     if df_data.empty: return pd.DataFrame()
         
@@ -227,7 +268,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
             latest_price = close_prices.iloc[-1]
             bias_20 = ((latest_price - ma20.iloc[-1]) / ma20.iloc[-1]) * 100
             
-            # ✨ 新增 3：計算 RVOL (成交量熱度倍數)
             volumes = df_volumes[ticker].dropna()
             rvol = 0.0
             vol_surge = False
@@ -249,13 +289,18 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
             elif is_hot_sector and not signal_type and rvol > 1.5: signal_type = "板塊異動(爆量)"
                 
             if signal_type:
-                print(f"分析中: {ticker} ({signal_type})...")
+                print(f"\n➤ 發現異動: {ticker} ({signal_type})... 準備提取資料與 AI 分析")
                 stock_obj = yf.Ticker(ticker)
-                fund_score, latest_news, sector, days_to_earnings = get_fundamental_sentiment_score(stock_obj, ticker)
+                
+                # 取得所有基本面資訊以及原始新聞 (給 AI 閱讀用)
+                fund_score, latest_news, sector, days_to_earnings, news_list_raw = get_fundamental_sentiment_score(stock_obj, ticker)
                 strategy = get_investment_strategy(stock_obj, latest_price, fund_score, signal_type, days_to_earnings)
                 
                 if signal_type == "持倉監控":
                     strategy['綜合建議'] = "🔹 日常追蹤" if fund_score >= 50 else "⚠️ 基本面弱化，留意停損"
+
+                # ✨ 呼叫 AI 進行深度判斷 (自帶 4.5 秒保護延遲)
+                ai_verdict = analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw)
 
                 identity = '🔍 掃描發現'
                 if is_portfolio: identity = '💼 我的持倉'
@@ -264,17 +309,18 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
                 stock_data = {
                     '身份': identity,
                     '代碼': ticker, 
-                    '產業板塊': sector,           # 新增欄位
+                    '產業板塊': sector,           
                     '型態': signal_type, 
                     '現價': round(latest_price, 2),
                     'RSI': round(latest_rsi, 2), 
-                    '熱度(RVOL)': f"{rvol}x",    # 新增欄位
-                    '財報日': days_to_earnings,  # 新增欄位
+                    '熱度(RVOL)': f"{rvol}x",    
+                    '財報日': days_to_earnings,  
                     '評分': f"{int(fund_score)}",
                     '綜合建議': strategy['綜合建議'], 
                     '期權履約價': strategy['期權履約價'],
                     '年化報酬': strategy['年化報酬'], 
-                    '最新新聞': latest_news
+                    '最新新聞': latest_news,
+                    '🤖 AI 投研觀點': ai_verdict # ✨ 最終 AI 分析結果
                 }
                 results.append(stock_data)
         except Exception as e:
@@ -291,6 +337,7 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
     msg['To'] = to_email
     msg['Subject'] = subject
     
+    # CSS 微調，確保 AI 觀點欄位有足夠的寬度顯示
     html_style = """
     <style>
         body { font-family: 'Segoe UI', Arial, sans-serif; color: #2c3e50; }
@@ -299,8 +346,9 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
         th { background-color: #2c3e50; color: white; padding: 10px 5px; text-align: center; }
         td { border: 1px solid #bdc3c7; padding: 8px 5px; text-align: center; word-wrap: break-word; vertical-align: middle; }
         tr:nth-child(even) { background-color: #f8f9fa; }
-        th:last-child { width: 25%; }
-        td:last-child { text-align: left; font-size: 11px; color: #34495e; line-height: 1.4; }
+        th:nth-last-child(2) { width: 18%; } /* 新聞欄位寬度 */
+        th:last-child { width: 18%; background-color: #8e44ad; } /* AI 觀點欄位特別標示 */
+        td:nth-last-child(2), td:last-child { text-align: left; font-size: 11px; color: #34495e; line-height: 1.4; }
         .high-rvol { color: #e74c3c; font-weight: bold; }
     </style>
     """
@@ -320,36 +368,35 @@ if __name__ == "__main__":
     ndx_tickers, fetch_status_msg = get_nasdaq_100_tickers()
     target_df = scan_market_opportunities(ndx_tickers, MY_PORTFOLIO, HOT_SECTORS)
     
-    subject = f"🧠 量化早報：多板塊熱力掃描 ({datetime.today().strftime('%Y-%m-%d')})"
-    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 | 🔥 熱門板塊池：{len(HOT_SECTORS)} 檔</div>"
+    subject = f"🧠 量化早報：多板塊熱力掃描與 AI 觀點 ({datetime.today().strftime('%Y-%m-%d')})"
+    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 | 🔥 熱門板塊池：{len(HOT_SECTORS)} 檔<br>🤖 AI Agent 已啟用 (嚴格遵守免費額度)</div>"
     
     if target_df.empty:
         body = f"{status_html}<h3>今日無符合條件標的</h3>"
     else:
-        # ✨ 新增排序邏輯：1.身份優先(持倉>熱門>一般) 2.型態 3.成交量熱度(RVOL)降冪
         target_df['身份權重'] = target_df['身份'].map({'💼 我的持倉': 1, '🔥 熱門板塊': 2, '🔍 掃描發現': 3})
-        # 將 RVOL 的 "x" 拿掉轉成數字來排序
         target_df['RVOL_num'] = target_df['熱度(RVOL)'].str.replace('x', '').astype(float)
         
         target_df = target_df.sort_values(by=['身份權重', '型態', 'RVOL_num'], ascending=[True, False, False])
-        target_df = target_df.drop(columns=['身份權重', 'RVOL_num']) # 隱藏輔助排序欄位
+        target_df = target_df.drop(columns=['身份權重', 'RVOL_num']) 
         
         pd.set_option('display.max_colwidth', None)
         html_table = target_df.to_html(index=False, escape=False)
         
-        # 標記高成交量
         html_table = html_table.replace('<td>2.', '<td class="high-rvol">🔥 2.')
         html_table = html_table.replace('<td>3.', '<td class="high-rvol">🔥 3.')
+        html_table = html_table.replace('<td>4.', '<td class="high-rvol">🔥 4.')
         
         body = (f"{status_html}"
                 f"<h2>🎯 發現 {len(target_df)} 檔異動標的：</h2>"
                 f"{html_table}")
         
-        # Emoji 顏色渲染
         body = body.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
         body = body.replace('🟢', '<span style="color:#27ae60; font-weight:bold;">🟢</span>')
         body = body.replace('🔴', '<span style="color:#c0392b; font-weight:bold;">🔴</span>')
         body = body.replace('🚀', '<span style="color:#8e44ad; font-weight:bold;">🚀</span>')
+        body = body.replace('【可以建倉】', '<span style="color:#27ae60; font-weight:bold;">【可以建倉】</span>')
+        body = body.replace('【高風險避開】', '<span style="color:#c0392b; font-weight:bold;">【高風險避開】</span>')
 
     to_email = os.environ.get("MAIL_TO")
     from_email = os.environ.get("MAIL_USER")
