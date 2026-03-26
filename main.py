@@ -8,14 +8,20 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import xml.etree.ElementTree as ET
+import requests
 import urllib.parse
 import time  
-import json  
+import json
+import base64  # ✨ 新增：用來解碼網址，防止編輯器破壞格式
 from google import genai  
-# ✨ 終極升級：使用 curl_cffi 完美偽裝成真實瀏覽器，突破所有 IP 封鎖！
-from curl_cffi import requests as cffi_requests
 
 warnings.filterwarnings('ignore')
+
+# ==========================================
+# 🛡️ 網址防護函數 (防止複製貼上時被轉成超連結)
+# ==========================================
+def get_safe_url(b64_str):
+    return base64.b64decode(b64_str).decode('utf-8')
 
 # ==========================================
 # API 金鑰與 AI 模型設定
@@ -31,14 +37,21 @@ if GEMINI_API_KEY:
 MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
 
 # ==========================================
+# 網路連線設定 (偽裝成真人瀏覽器)
+# ==========================================
+REQ_SESSION = requests.Session()
+REQ_SESSION.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+})
+
+# ==========================================
 # 🤖 AI 動態板塊尋標器 (Sector Rotation)
 # ==========================================
 def get_ai_dynamic_sectors():
     fallback_tickers = ['RKLB', 'ASTS', 'BKSY', 'LITE', 'COHR', 'AMD', 'ARM', 'SMCI', 'MARA']
     fallback_desc = "太空, 矽光子, AI伺服器 (備用預設)"
 
-    if not ai_client:
-        return fallback_tickers, fallback_desc
+    if not ai_client: return fallback_tickers, fallback_desc
 
     today_str = datetime.today().strftime('%Y-%m-%d')
     prompt = f"""
@@ -87,7 +100,7 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
     你是一位具備「高風險偏好」的華爾街資深波段交易員與量化分析師。
     目前美股代號 {ticker} 觸發了「{signal_type}」的技術面訊號，且近期的成交量熱度為 {rvol} 倍。
     
-    以下是該公司最新的催化劑新聞：
+    以下是該公司最新的催化劑新聞標題：
     {news_text}
 
     請嚴格遵守以下【量化交易決策法則】進行判斷：
@@ -115,12 +128,10 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
         return "AI 伺服器忙線中"
 
 # ==========================================
-# 🏆 終極破甲版：三層瀑布流新聞抓取模組
+# 三層瀑布流新聞抓取模組 (結合 Base64 網址防護)
 # ==========================================
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
-    
-    # 1. 嘗試 yfinance 原生 API
     try:
         news = ticker_obj.news
         if news and len(news) > 0:
@@ -129,60 +140,53 @@ def get_robust_news(ticker_obj, ticker_symbol):
             if news_items: return news_items
     except: pass
 
-    # 2. ✨ 核心升級：使用 curl_cffi 完美偽裝成 Chrome 110，突破 GitHub IP 封鎖
     try:
+        # 解碼 Google News 網址基底
+        base_url = get_safe_url('aHR0cHM6Ly9uZXdzLmdvb2dsZS5jb20vcnNzL3NlYXJjaD9xPQ==')
         query = urllib.parse.quote(f"{ticker_symbol} stock")
-        url = f"[https://news.google.com/rss/search?q=](https://news.google.com/rss/search?q=){query}&hl=en-US&gl=US&ceid=US:en"
+        url = f"{base_url}{query}&hl=en-US&gl=US&ceid=US:en"
         
-        # impersonate="chrome110" 是突破封鎖的魔法
-        response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
-        
+        response = REQ_SESSION.get(url, timeout=5)
         if response.status_code == 200:
-            root = ET.fromstring(response.text)
+            root = ET.fromstring(response.content)
             for item in root.findall('.//channel/item')[:5]:
                 title_elem = item.find('title')
-                if title_elem is not None:
-                    clean_title = title_elem.text.split(' - ')[0]
-                    news_items.append({'title': clean_title, 'publisher': 'Google News'})
+                if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Google News'})
             if news_items: 
-                time.sleep(1) # 防禦性延遲
+                time.sleep(1) # 小歇一下防封鎖
                 return news_items
-    except Exception as e: 
-        print(f"[{ticker_symbol}] Google News 抓取異常: {e}")
-        pass
+    except: pass
 
-    # 3. 嘗試 Yahoo RSS (搭配 curl_cffi)
     try:
-        url = f"[https://feeds.finance.yahoo.com/rss/2.0/headline?s=](https://feeds.finance.yahoo.com/rss/2.0/headline?s=){ticker_symbol}&region=US&lang=en-US"
-        response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
+        # 解碼 Yahoo RSS 網址基底
+        base_url = get_safe_url('aHR0cHM6Ly9mZWVkcy5maW5hbmNlLnlhaG9vLmNvbS9yc3MvMi4wL2hlYWRsaW5lP3M9')
+        url = f"{base_url}{ticker_symbol}&region=US&lang=en-US"
+        
+        response = REQ_SESSION.get(url, timeout=5)
         if response.status_code == 200:
-            root = ET.fromstring(response.text)
+            root = ET.fromstring(response.content)
             for item in root.findall('.//item')[:5]:
                 title_elem = item.find('title')
                 if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Yahoo RSS'})
             if news_items: return news_items
     except: pass
-
     return [] 
 
 # ==========================================
-# ✨ 修復網址：動態抓取 Nasdaq 100
+# ✨ 動態抓取 Nasdaq 100 (結合 Base64 網址防護)
 # ==========================================
 def get_nasdaq_100_tickers():
     print("正在獲取 Nasdaq 100 成分股...")
     try:
-        # ⚠️ 魔法防護：用字串拼接，防止編輯器雞婆幫你轉成 Markdown 超連結！
-        url = '[https://en.wiki](https://en.wiki)' + 'pedia.org/wiki/Nasdaq-100'
-        
-        # 同樣使用 curl_cffi 突破維基百科的機器人阻擋
-        response = cffi_requests.get(url, impersonate="chrome110", timeout=15)
-        tables = pd.read_html(response.text)
-        
+        # 解碼 Wikipedia 網址，徹底防止被轉成 Markdown 超連結
+        url = get_safe_url('aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvTmFzZGFxLTEwMA==')
+        html_content = REQ_SESSION.get(url, timeout=10).text
+        tables = pd.read_html(html_content)
         for table in tables:
             if 'Ticker' in table.columns: return table['Ticker'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
             elif 'Symbol' in table.columns: return table['Symbol'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
     except Exception as e:
-        return ['AAPL', 'MSFT'], f"⚠️ 維基百科抓取失敗，使用備用清單 ({e})"
+        return ['AAPL', 'MSFT'], f"⚠️ 抓取失敗，使用備用清單 ({e})"
     return ['AAPL'], "⚠️ 發生未知錯誤"
 
 # ==========================================
@@ -424,7 +428,7 @@ if __name__ == "__main__":
     
     subject = f"🧠 量化早報：AI 動態板塊尋標與防護 ({datetime.today().strftime('%Y-%m-%d')})"
     
-    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🔥 AI 動態板塊鎖定：<b>{hot_sectors_desc}</b> ({len(dynamic_hot_sectors)} 檔標的)</div>"
+    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🔥 AI 動態板塊鎖定：<b>{hot_sectors_desc}</b> ({len(dynamic_hot_sectors)} 檔)</div>"
     
     if target_df.empty:
         body = f"{status_html}<h3>今日無符合條件標的</h3>"
