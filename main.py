@@ -11,13 +11,13 @@ import xml.etree.ElementTree as ET
 import requests
 import urllib.parse
 import time  
-# ✨ 關鍵升級：匯入全新的 Google GenAI 官方套件
+import json  # ✨ 新增：用來解析 AI 傳回來的動態清單
 from google import genai  
 
 warnings.filterwarnings('ignore')
 
 # ==========================================
-# API 金鑰與 AI 模型設定 (全新寫法)
+# API 金鑰與 AI 模型設定
 # ==========================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ai_client = None
@@ -25,19 +25,12 @@ if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ==========================================
-# 參數設定區 (加入你的專屬強勢板塊與持倉)
+# 參數設定區 (持倉)
 # ==========================================
 MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
 
-HOT_SECTORS = [
-    'RKLB', 'ASTS', 'BKSY', 'SIDU', 'PLTR', 
-    'LITE', 'COHR', 'FN', 'LUMN',           
-    'AMD', 'MU', 'ARM', 'SMCI',             
-    'ONDS', 'SERV', 'SYM', 'MARA' # ✨ 已修復：補上逗號，避免變成 SYMMARA
-]
-
 # ==========================================
-# 網路連線設定 (偽裝成真人瀏覽器)
+# 網路連線設定
 # ==========================================
 REQ_SESSION = requests.Session()
 REQ_SESSION.headers.update({
@@ -45,7 +38,54 @@ REQ_SESSION.headers.update({
 })
 
 # ==========================================
-# 🤖 AI 自動化審查代理 (全面升級版)
+# 🤖 AI 動態板塊尋標器 (Sector Rotation)
+# ==========================================
+def get_ai_dynamic_sectors():
+    """讓 AI 每天自動選出市場最熱門的 3 個板塊，並回傳股票清單"""
+    # 如果沒有 AI 金鑰，使用備用清單防呆
+    fallback_tickers = ['RKLB', 'ASTS', 'BKSY', 'LITE', 'COHR', 'AMD', 'ARM', 'SMCI', 'MARA']
+    fallback_desc = "太空, 矽光子, AI伺服器 (備用預設)"
+
+    if not ai_client:
+        return fallback_tickers, fallback_desc
+
+    today_str = datetime.today().strftime('%Y-%m-%d')
+    prompt = f"""
+    現在是 {today_str}。你是一位華爾街頂尖的「板塊輪動與資金流向分析師」。
+    請評估當前美股市場的最新動態，選出「當前資金最集中、最具爆發力的 3 個產業板塊」。
+    然後，為這 3 個板塊各挑選 3~4 檔最具代表性、流動性佳的美股股票代碼（總共約 9~12 檔）。
+
+    請嚴格以 JSON 格式輸出，不要有任何 Markdown 標記 (如 ```json) 或其他解釋文字，格式如下：
+    {{
+      "sector_names": "板塊A, 板塊B, 板塊C",
+      "tickers": ["代碼1", "代碼2", "代碼3", "代碼4", "代碼5"]
+    }}
+    """
+    try:
+        print("🧠 正在請 AI 偵測今日市場最熱門的 3 大板塊...")
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        
+        # 清理字串並解析 JSON
+        cleaned_text = response.text.replace('```json', '').replace('```', '').strip()
+        data = json.loads(cleaned_text)
+        
+        hot_tickers = [ticker.strip().upper() for ticker in data.get("tickers", fallback_tickers)]
+        hot_sectors_desc = data.get("sector_names", fallback_desc)
+        
+        print(f"🔥 AI 動態精選板塊: {hot_sectors_desc}")
+        print(f"🔥 選出標的: {hot_tickers}")
+        
+        time.sleep(3) # 稍微冷卻一下保護 API 額度
+        return hot_tickers, hot_sectors_desc
+    except Exception as e:
+        print(f"⚠️ AI 獲取動態板塊失敗 ({e})，使用備用清單。")
+        return fallback_tickers, fallback_desc
+
+# ==========================================
+# 🤖 AI 自動化審查代理 (積極進攻版 Prompt)
 # ==========================================
 def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
     if not ai_client: return "⚠️ 未設定 API Key"
@@ -54,21 +94,22 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw):
     news_text = "\n".join([f"- {item.get('title', '')}" for item in news_list_raw[:5]])
     
     prompt = f"""
-    你是一位華爾街資深波段交易員與避險基金風險控制專家。
+    你是一位具備「高風險偏好」的華爾街資深波段交易員與量化分析師。
     目前美股代號 {ticker} 觸發了「{signal_type}」的技術面訊號，且近期的成交量熱度為 {rvol} 倍。
     
-    以下是該公司最新的催化劑新聞標題：
+    以下是該公司最新的催化劑新聞：
     {news_text}
 
-    請依據以上資訊簡短分析：
-    1. 這是「結構性破壞（如掉單、假帳）」還是「情緒性錯殺/短期波動（如大盤拖累、短期降評、財報微幅不及預期）」？若是強勢突破，是因為什麼實質利多？
-    2. 給出你的最終結論：【可以建倉】或【高風險避開】。
+    請嚴格遵守以下【量化交易決策法則】進行判斷：
+    1. 【超跌反彈法則】：如果利空僅為「大盤整體回調」、「總經數據影響」或「短期情緒性錯殺」，非該公司單一結構性雷區，請積極判定為【可以建倉】。
+    2. 【動能突破法則】：若成交量熱度(RVOL)大於 1.5 倍，且新聞包含實質利多（如超預期、新訂單、升評），視為主升段啟動，請判定為【可以建倉】。
+    3. 【一票否決法則】：只有在面臨明確的「結構性基本面破壞」（如：假帳、掉單、嚴重衰退、高層醜聞）時，才判定為【高風險避開】。
 
-    請將字數嚴格限制在 50 個中文字以內，直接給出結論。
+    給出你的最終結論（格式：50字內分析理由。結論：【可以建倉】或【高風險避開】）。
+    請將字數嚴格限制在 50 個中文字以內，直接輸出。
     """
     
     try:
-        # ✨ 關鍵升級：使用最新語法與最新的 gemini-2.5-flash 引擎
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
@@ -97,7 +138,7 @@ def get_robust_news(ticker_obj, ticker_symbol):
     except: pass
 
     try:
-        url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker_symbol}&region=US&lang=en-US"
+        url = f"[https://feeds.finance.yahoo.com/rss/2.0/headline?s=](https://feeds.finance.yahoo.com/rss/2.0/headline?s=){ticker_symbol}&region=US&lang=en-US"
         response = REQ_SESSION.get(url, timeout=5)
         if response.status_code == 200:
             root = ET.fromstring(response.content)
@@ -109,7 +150,7 @@ def get_robust_news(ticker_obj, ticker_symbol):
 
     try:
         query = urllib.parse.quote(f"{ticker_symbol} stock")
-        url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+        url = f"[https://news.google.com/rss/search?q=](https://news.google.com/rss/search?q=){query}&hl=en-US&gl=US&ceid=US:en"
         response = REQ_SESSION.get(url, timeout=5)
         if response.status_code == 200:
             root = ET.fromstring(response.content)
@@ -123,7 +164,7 @@ def get_robust_news(ticker_obj, ticker_symbol):
 def get_nasdaq_100_tickers():
     print("正在獲取 Nasdaq 100 成分股...")
     try:
-        url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
+        url = '[https://en.wikipedia.org/wiki/Nasdaq-100](https://en.wikipedia.org/wiki/Nasdaq-100)'
         html_content = REQ_SESSION.get(url, timeout=10).text
         tables = pd.read_html(html_content)
         for table in tables:
@@ -301,12 +342,11 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
                 if signal_type == "持倉監控":
                     strategy['綜合建議'] = "🔹 日常追蹤" if fund_score >= 50 else "⚠️ 基本面弱化，留意停損"
 
-                # 呼叫 AI 進行深度判斷
                 ai_verdict = analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw)
 
                 identity = '🔍 掃描發現'
                 if is_portfolio: identity = '💼 我的持倉'
-                elif is_hot_sector: identity = '🔥 熱門板塊'
+                elif is_hot_sector: identity = '🔥 動態熱門板塊'
 
                 stock_data = {
                     '身份': identity,
@@ -366,16 +406,24 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
         print(f"❌ 寄信失敗: {e}")
 
 if __name__ == "__main__":
+    # 1. 抓取納斯達克 100
     ndx_tickers, fetch_status_msg = get_nasdaq_100_tickers()
-    target_df = scan_market_opportunities(ndx_tickers, MY_PORTFOLIO, HOT_SECTORS)
     
-    subject = f"🧠 量化早報：多板塊熱力掃描與 AI 觀點 ({datetime.today().strftime('%Y-%m-%d')})"
-    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 | 🔥 熱門板塊池：{len(HOT_SECTORS)} 檔<br>🤖 AI Agent 已升級為 Gemini 2.5 引擎</div>"
+    # 2. ✨ 核心升級：讓 AI 動態抓取今天最熱門的 3 個板塊與對應標的
+    dynamic_hot_sectors, hot_sectors_desc = get_ai_dynamic_sectors()
+    
+    # 3. 將持倉、納斯達克、動態熱門板塊一起丟入雷達掃描
+    target_df = scan_market_opportunities(ndx_tickers, MY_PORTFOLIO, dynamic_hot_sectors)
+    
+    subject = f"🧠 量化早報：AI 動態板塊尋標與防護 ({datetime.today().strftime('%Y-%m-%d')})"
+    
+    # 在信件最上方顯示 AI 今天挑選了哪些熱門板塊
+    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🔥 AI 動態板塊鎖定：<b>{hot_sectors_desc}</b> ({len(dynamic_hot_sectors)} 檔標的)</div>"
     
     if target_df.empty:
         body = f"{status_html}<h3>今日無符合條件標的</h3>"
     else:
-        target_df['身份權重'] = target_df['身份'].map({'💼 我的持倉': 1, '🔥 熱門板塊': 2, '🔍 掃描發現': 3})
+        target_df['身份權重'] = target_df['身份'].map({'💼 我的持倉': 1, '🔥 動態熱門板塊': 2, '🔍 掃描發現': 3})
         target_df['RVOL_num'] = target_df['熱度(RVOL)'].str.replace('x', '').astype(float)
         
         target_df = target_df.sort_values(by=['身份權重', '型態', 'RVOL_num'], ascending=[True, False, False])
@@ -408,4 +456,5 @@ if __name__ == "__main__":
     else:
         print("\n=== 🎯 本地終端機預覽 ===")
         print(fetch_status_msg)
+        print(f"🔥 AI 動態板塊鎖定: {hot_sectors_desc}")
         if not target_df.empty: print(target_df.to_markdown(index=False))
