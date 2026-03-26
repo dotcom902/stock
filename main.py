@@ -30,8 +30,9 @@ MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR']
 HOT_SECTORS = [
     'RKLB', 'ASTS', 'BKSY', 'SIDU', 'PLTR', # 太空與國防大數據
     'LITE', 'COHR', 'FN', 'LUMN',           # 光通訊 (矽光子)
-    'AMD', 'MU', 'ARM', 'SMCI',             # 半導體與AI伺服器
+    'AMD', 'MU', 'ARM', 'SNDK',             # 半導體與AI伺服器
     'ONDS', 'SERV', 'SYM'                   # 自動化與機器人
+    'MARA', 'IREN', 'COIN','CRCL'                   # 加密貨幣
 ]
 
 # ==========================================
