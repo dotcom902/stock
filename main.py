@@ -25,10 +25,10 @@ def get_safe_url(b64_str):
     return base64.b64decode(b64_str).decode('utf-8')
 
 # ==========================================
-# API 金鑰與 AI 模型設定 (✨ 指定高容量免費版模型)
+# API 金鑰與 AI 模型設定 
 # ==========================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-AI_MODEL_NAME = 'gemini-2.0-flash'  # ✨ 每天有 1500 次免費額度的黃金模型
+AI_MODEL_NAME = 'gemini-2.0-flash'  
 
 ai_client = None
 if GEMINI_API_KEY:
@@ -39,9 +39,6 @@ if GEMINI_API_KEY:
 # ==========================================
 MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
 
-# ==========================================
-# 網路連線設定 (偽裝成真人瀏覽器)
-# ==========================================
 REQ_SESSION = requests.Session()
 REQ_SESSION.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
@@ -68,86 +65,56 @@ def get_ai_dynamic_sectors(max_retries=2):
       "tickers": ["代碼1", "代碼2", "代碼3", "代碼4", "代碼5"]
     }}
     """
-    
     for attempt in range(max_retries):
         try:
-            print(f"🧠 正在請 AI ({AI_MODEL_NAME}) 偵測今日市場最熱門的 3 大板塊...")
-            response = ai_client.models.generate_content(
-                model=AI_MODEL_NAME,
-                contents=prompt
-            )
-            
-            cleaned_text = response.text.replace('```json', '').replace('```', '').strip()
-            data = json.loads(cleaned_text)
-            
+            print(f"🧠 正在請 AI 偵測今日市場最熱門的 3 大板塊...")
+            response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
+            data = json.loads(response.text.replace('```json', '').replace('```', '').strip())
             hot_tickers = [ticker.strip().upper() for ticker in data.get("tickers", fallback_tickers)]
             hot_sectors_desc = data.get("sector_names", fallback_desc)
-            
             print(f"🔥 AI 動態精選板塊: {hot_sectors_desc}")
-            print(f"🔥 選出標的: {hot_tickers}")
-            
-            time.sleep(3) 
             return hot_tickers, hot_sectors_desc
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                print(f"⚠️ 獲取板塊觸發 API 流量限制，等待 15 秒後重試...")
-                time.sleep(15)
+            if "429" in str(e):
+                time.sleep(10)
             else:
-                print(f"⚠️ AI 獲取動態板塊失敗 ({e})，使用備用清單。")
                 return fallback_tickers, fallback_desc
-                
     return fallback_tickers, fallback_desc
 
 # ==========================================
 # 🤖 AI 自動化審查代理
 # ==========================================
-def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=3):
+def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=2):
     if not ai_client: return "⚠️ 未設定 API Key"
     if not news_list_raw: return "無足夠新聞資訊"
     
     news_text = "\n".join([f"- {item.get('title', '')}" for item in news_list_raw[:5]])
     
     prompt = f"""
-    你是一位具備「高風險偏好」的華爾街資深波段交易員與量化分析師。
-    目前美股代號 {ticker} 觸發了「{signal_type}」的技術面訊號，且近期的成交量熱度為 {rvol} 倍。
-    
-    以下是該公司最新的催化劑新聞標題：
+    你是一位華爾街資深波段交易員。美股 {ticker} 觸發了「{signal_type}」，近期成交量熱度 {rvol} 倍。
+    以下是最新新聞：
     {news_text}
 
-    請嚴格遵守以下【量化交易決策法則】進行判斷：
-    1. 【超跌反彈法則】：如果利空僅為「大盤整體回調」、「總經數據影響」或「短期情緒性錯殺」，非該公司單一結構性雷區，請積極判定為【可以建倉】。
-    2. 【動能突破法則】：若成交量熱度(RVOL)大於 1.5 倍，且新聞包含實質利多（如超預期、新訂單、升評），視為主升段啟動，請判定為【可以建倉】。
-    3. 【一票否決法則】：只有在面臨明確的「結構性基本面破壞」（如：假帳、掉單、嚴重衰退、高層醜聞）時，才判定為【高風險避開】。
+    量化法則：
+    1. 【超跌反彈】：若僅為大盤回調或情緒錯殺，判定【可以建倉】。
+    2. 【動能突破】：若有實質利多（超預期、新訂單），判定【可以建倉】。
+    3. 【一票否決】：若為結構性破壞（假帳、掉單、訴訟），判定【高風險避開】。
 
-    給出你的最終結論（格式：50字內分析理由。結論：【可以建倉】或【高風險避開】）。
-    請將字數嚴格限制在 50 個中文字以內，直接輸出。
+    格式：50字內分析理由。結論：【可以建倉】或【高風險避開】。
     """
     
     for attempt in range(max_retries):
         try:
-            response = ai_client.models.generate_content(
-                model=AI_MODEL_NAME,
-                contents=prompt
-            )
-            
-            # 2.0 版本的限制非常寬裕，但為求穩定依然給予 5 秒冷卻
-            print(f"[{ticker}] AI 分析完成，冷卻 5 秒以保護免費額度...")
-            time.sleep(5) 
+            response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
+            print(f"[{ticker}] AI 分析完成。")
+            time.sleep(4) # 縮短冷卻時間，因為我們只分析 5 檔
             return response.text.replace('\n', '<br>')
-            
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "Quota" in error_msg:
-                wait_time = 20 + (attempt * 10) 
-                print(f"[{ticker}] 觸發免費額度限制 (429)，自動暫停 {wait_time} 秒後重試 (第 {attempt+1} 次)...")
-                time.sleep(wait_time)
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                time.sleep(15)
             else:
-                print(f"[{ticker}] AI 分析失敗: {e}")
-                time.sleep(5) 
                 return "AI 伺服器忙線中"
-                
-    return "⚠️ API 流量限制，請稍後再試"
+    return "⚠️ 系統節流跳過"
 
 # ==========================================
 # 🏆 三層瀑布流新聞抓取模組
@@ -166,54 +133,27 @@ def get_robust_news(ticker_obj, ticker_symbol):
         base_url = get_safe_url('aHR0cHM6Ly9uZXdzLmdvb2dsZS5jb20vcnNzL3NlYXJjaD9xPQ==')
         query = urllib.parse.quote(f"{ticker_symbol} stock")
         url = f"{base_url}{query}&hl=en-US&gl=US&ceid=US:en"
-        
         response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
         if response.status_code == 200:
             root = ET.fromstring(response.text)
             for item in root.findall('.//channel/item')[:5]:
                 title_elem = item.find('title')
                 if title_elem is not None:
-                    clean_title = title_elem.text.split(' - ')[0]
-                    news_items.append({'title': clean_title, 'publisher': 'Google News'})
-            if news_items: 
-                time.sleep(1) 
-                return news_items
-    except: pass
-
-    try:
-        base_url = get_safe_url('aHR0cHM6Ly9mZWVkcy5maW5hbmNlLnlhaG9vLmNvbS9yc3MvMi4wL2hlYWRsaW5lP3M9')
-        url = f"{base_url}{ticker_symbol}&region=US&lang=en-US"
-        
-        response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
-        if response.status_code == 200:
-            root = ET.fromstring(response.text)
-            for item in root.findall('.//item')[:5]:
-                title_elem = item.find('title')
-                if title_elem is not None: news_items.append({'title': title_elem.text, 'publisher': 'Yahoo RSS'})
+                    news_items.append({'title': title_elem.text.split(' - ')[0], 'publisher': 'Google News'})
             if news_items: return news_items
     except: pass
     return [] 
 
-# ==========================================
-# ✨ 動態抓取 Nasdaq 100
-# ==========================================
 def get_nasdaq_100_tickers():
-    print("正在獲取 Nasdaq 100 成分股...")
     try:
         url = get_safe_url('aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvTmFzZGFxLTEwMA==')
         response = cffi_requests.get(url, impersonate="chrome110", timeout=15)
         tables = pd.read_html(response.text)
-        
         for table in tables:
             if 'Ticker' in table.columns: return table['Ticker'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
             elif 'Symbol' in table.columns: return table['Symbol'].tolist(), f"✅ 成功抓取 {len(table)} 檔 Nasdaq 100"
-    except Exception as e:
-        return ['AAPL', 'MSFT'], f"⚠️ 抓取失敗，使用備用清單 ({e})"
-    return ['AAPL'], "⚠️ 發生未知錯誤"
+    except Exception as e: return ['AAPL', 'MSFT'], f"⚠️ 抓取失敗"
 
-# ==========================================
-# 數據驗證與基本面抓取
-# ==========================================
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     score = 50
     latest_news_str = "無最新新聞" 
@@ -223,21 +163,15 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
 
     try:
         info = ticker_obj.info
-        if not info: raise ValueError("無法獲取 info")
-
         sector = info.get('sector', '未知板塊')
-        industry = info.get('industry', '')
-        if industry: sector = f"{sector} ({industry})"
+        if info.get('industry'): sector = f"{sector} ({info.get('industry')})"
 
         earn_ts = info.get('earningsTimestamp')
         if earn_ts:
-            earn_date = datetime.fromtimestamp(earn_ts)
-            days = (earn_date.date() - datetime.today().date()).days
+            days = (datetime.fromtimestamp(earn_ts).date() - datetime.today().date()).days
             if days >= 0:
-                days_to_earnings = f"{days} 天後"
-                if days <= 5: days_to_earnings = f"⚠️ {days}天後(避開Sell Put)"
-            else:
-                days_to_earnings = "近期已發布"
+                days_to_earnings = f"⚠️ {days}天後" if days <= 5 else f"{days} 天後"
+            else: days_to_earnings = "近期已發布"
 
         current_price = info.get('currentPrice', 0)
         target_price = info.get('targetMeanPrice', 0)
@@ -249,161 +183,144 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
         rec = info.get('recommendationKey', '')
         if rec in ['buy', 'strong_buy']: score += 10
         elif rec in ['sell', 'strong_sell', 'underperform']: score -= 15
-
-        bull_keywords = ['upgrade', 'beat', 'growth', 'surge', 'buy', 'higher', 'record']
-        bear_keywords = ['downgrade', 'miss', 'cut', 'drop', 'lawsuit', 'sell', 'lower', 'weak']
         
         news_list_raw = get_robust_news(ticker_obj, ticker_symbol)
         if news_list_raw:
+            bull_keywords, bear_keywords = ['upgrade', 'beat', 'growth'], ['downgrade', 'miss', 'cut', 'lawsuit']
             news_score = 0
-            news_display = [] 
+            news_display = []
             for i, article in enumerate(news_list_raw):
                 title = article.get('title', '')
                 if any(k in title.lower() for k in bull_keywords): news_score += 4
                 if any(k in title.lower() for k in bear_keywords): news_score -= 5
-                if i < 2 and title:
-                    publisher = article.get('publisher', '')
-                    display_text = f"▪️ {title}" if " - " in title else f"▪️ {title} ({publisher})"
-                    news_display.append(display_text)
-
+                if i < 2: news_display.append(f"▪️ {title}")
             score += news_score
             if news_display: latest_news_str = "<br><br>".join(news_display)
 
         return max(0, min(100, score)), latest_news_str, sector, days_to_earnings, news_list_raw
-    except Exception as e:
-        return 50, "數據抓取異常", "未知", "未知", []
+    except: return 50, "數據抓取異常", "未知", "未知", []
 
 def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_to_earnings):
-    earnings_warning = "⚠️財報將近" in days_to_earnings
-
-    if signal_type == "超跌反彈":
+    earnings_warning = "⚠️" in days_to_earnings
+    if signal_type == "超跌反彈" or signal_type == "強勢回檔":
         if score < 40: return {'綜合建議': '🔴 觀望(基本面轉弱)', '期權履約價': '-', '年化報酬': '-'}
         try:
             exp_dates = ticker_obj.options
-            if not exp_dates or len(exp_dates) == 0: raise ValueError("無期權")
-                
-            today = datetime.today()
             target_date, target_days = None, 0
             for date_str in exp_dates:
-                days_to_exp = (datetime.strptime(date_str, '%Y-%m-%d') - today).days
+                days_to_exp = (datetime.strptime(date_str, '%Y-%m-%d') - datetime.today()).days
                 if 25 <= days_to_exp <= 45:
                     target_date, target_days = date_str, days_to_exp
                     break
-                    
-            if not target_date: return {'綜合建議': '🟢 買入正股(無合適期權)', '期權履約價': '-', '年化報酬': '-'}
+            if not target_date: raise ValueError()
             
             chain = ticker_obj.option_chain(target_date)
-            if chain.puts.empty: raise ValueError("無 Put")
-            
             cushion = 0.92 if score >= 60 else 0.85
             suitable_puts = chain.puts[chain.puts['strike'] <= current_price * cushion]
-            if suitable_puts.empty: return {'綜合建議': '🟢 買入正股', '期權履約價': '-', '年化報酬': '-'}
+            if suitable_puts.empty: raise ValueError()
             
             best_put = suitable_puts.sort_values(by='strike', ascending=False).iloc[0]
             premium = best_put['bid'] if best_put['bid'] > 0 else best_put['lastPrice']
-            if premium <= 0 or best_put['strike'] - premium <= 0: raise ValueError("權利金異常")
+            if premium <= 0: raise ValueError()
                 
             annual_roc = (premium / (best_put['strike'] - premium)) * 100 * (365 / target_days)
-            
-            action = '🟢 積極 Sell Put / 買正股' if score >= 60 else '🟡 保守 Sell Put'
-            if earnings_warning: action = '🔴 避開期權(財報高風險)'
-
+            action = '🟢 積極 Sell Put' if score >= 60 else '🟡 保守 Sell Put'
+            if earnings_warning: action = '🔴 避開期權(財報風險)'
             return {'綜合建議': action, '期權履約價': f"Put ${best_put['strike']} ({target_date})", '年化報酬': f"{round(annual_roc, 1)}%"}
         except: return {'綜合建議': '🟢 買入正股', '期權履約價': '-', '年化報酬': '-'}
             
-    elif signal_type == "動能突破":
+    elif signal_type == "動能突破" or signal_type == "板塊異動(爆量)":
         if score >= 65: return {'綜合建議': '🚀 順勢買正股 / Buy Call', '期權履約價': '-', '年化報酬': '-'}
-        elif score < 40: return {'綜合建議': '⚠️ 估值過高，考慮獲利了結', '期權履約價': '-', '年化報酬': '-'}
-        else: return {'綜合建議': '⚪ 持有觀望，設好移動停損', '期權履約價': '-', '年化報酬': '-'}
+        elif score < 40: return {'綜合建議': '⚠️ 估值偏高，設好停損', '期權履約價': '-', '年化報酬': '-'}
+        else: return {'綜合建議': '⚪ 持有觀望', '期權履約價': '-', '年化報酬': '-'}
 
 # ==========================================
-# 主掃描函數 
+# 主掃描函數 (✨ 新增 Top 5 狙擊手過濾邏輯)
 # ==========================================
 def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
-    
     print(f"開始下載 {len(all_tickers)} 檔股票歷史股價...")
     df_data = yf.download(all_tickers, period="3mo", progress=False) 
     
     if df_data.empty: return pd.DataFrame()
-        
-    df_closes = df_data['Close'].dropna(axis=1, how='all')
-    df_volumes = df_data['Volume'].dropna(axis=1, how='all')
+    df_closes, df_volumes = df_data['Close'].dropna(axis=1, how='all'), df_data['Volume'].dropna(axis=1, how='all')
     
-    results = []
+    raw_candidates = []
     
+    # 第一階段：快速篩選出有訊號的股票 (不呼叫 AI)
     for ticker in df_closes.columns:
         try:
-            close_prices = df_closes[ticker].dropna()
+            close_prices, volumes = df_closes[ticker].dropna(), df_volumes[ticker].dropna()
             if len(close_prices) < 20: continue 
                 
             delta = close_prices.diff()
             gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
             loss = -delta.clip(upper=0).ewm(alpha=1/14, adjust=False).mean()
-            rs = gain / loss
-            rs = rs.replace([np.inf, -np.inf], np.nan).fillna(100)
-            rsi = 100 - (100 / (1 + rs))
-            latest_rsi = rsi.iloc[-1]
+            rsi = (100 - (100 / (1 + gain / loss))).replace([np.inf, -np.inf], np.nan).fillna(100)
+            latest_rsi, latest_price = rsi.iloc[-1], close_prices.iloc[-1]
+            bias_20 = ((latest_price - close_prices.rolling(20).mean().iloc[-1]) / close_prices.rolling(20).mean().iloc[-1]) * 100
             
-            ma20 = close_prices.rolling(window=20).mean()
-            latest_price = close_prices.iloc[-1]
-            bias_20 = ((latest_price - ma20.iloc[-1]) / ma20.iloc[-1]) * 100
-            
-            volumes = df_volumes[ticker].dropna()
-            rvol = 0.0
-            vol_surge = False
+            rvol, vol_surge = 0.0, False
             if len(volumes) >= 20:
-                vol_ma20 = volumes.rolling(window=20).mean().iloc[-1]
-                latest_vol = volumes.iloc[-1]
+                vol_ma20 = volumes.rolling(20).mean().iloc[-1]
                 if pd.notna(vol_ma20) and vol_ma20 > 0:
-                    rvol = round(latest_vol / vol_ma20, 2)
+                    rvol = round(volumes.iloc[-1] / vol_ma20, 2)
                     vol_surge = rvol > 1.2 
             
+            is_portfolio, is_hot_sector = ticker in portfolio_list, ticker in hot_sectors_list
             signal_type = None
-            if latest_rsi < 35 and bias_20 < -6: signal_type = "超跌反彈"
-            elif latest_rsi > 65 and bias_20 > 5 and vol_surge: signal_type = "動能突破"
-                
-            is_portfolio = ticker in portfolio_list
-            is_hot_sector = ticker in hot_sectors_list
+
+            # ✨ 融入你的洞察：熱門板塊不抓超跌，只抓強勢回檔或突破
+            if is_hot_sector:
+                if latest_rsi > 65 and bias_20 > 5 and vol_surge: signal_type = "動能突破"
+                elif 40 <= latest_rsi <= 55 and bias_20 > -3 and vol_surge: signal_type = "強勢回檔"
+                elif rvol > 1.5: signal_type = "板塊異動(爆量)"
+            else:
+                if latest_rsi < 35 and bias_20 < -6: signal_type = "超跌反彈"
+                elif latest_rsi > 65 and bias_20 > 5 and vol_surge: signal_type = "動能突破"
 
             if is_portfolio and not signal_type: signal_type = "持倉監控"
-            elif is_hot_sector and not signal_type and rvol > 1.5: signal_type = "板塊異動(爆量)"
                 
             if signal_type:
-                print(f"\n➤ 發現異動: {ticker} ({signal_type})... 準備提取資料與 AI 分析")
                 stock_obj = yf.Ticker(ticker)
+                f_score, l_news, sector, d_earn, raw_news = get_fundamental_sentiment_score(stock_obj, ticker)
+                strat = get_investment_strategy(stock_obj, latest_price, f_score, signal_type, d_earn)
                 
-                fund_score, latest_news, sector, days_to_earnings, news_list_raw = get_fundamental_sentiment_score(stock_obj, ticker)
-                strategy = get_investment_strategy(stock_obj, latest_price, fund_score, signal_type, days_to_earnings)
+                if signal_type == "持倉監控": strat['綜合建議'] = "🔹 日常追蹤" if f_score >= 50 else "⚠️ 留意停損"
+
+                identity = '💼 我的持倉' if is_portfolio else ('🔥 動態熱門板塊' if is_hot_sector else '🔍 掃描發現')
                 
-                if signal_type == "持倉監控":
-                    strategy['綜合建議'] = "🔹 日常追蹤" if fund_score >= 50 else "⚠️ 基本面弱化，留意停損"
+                # 計算排序權重 (持倉優先，再來評分高、熱度高)
+                sort_weight = (1000 if is_portfolio else 0) + f_score + (rvol * 10)
 
-                ai_verdict = analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw)
+                raw_candidates.append({
+                    'sort_weight': sort_weight, 'raw_news': raw_news,
+                    'data': {
+                        '身份': identity, '代碼': ticker, '產業板塊': sector, '型態': signal_type, 
+                        '現價': round(latest_price, 2), 'RSI': round(latest_rsi, 2), '熱度(RVOL)': f"{rvol}x",    
+                        '財報日': d_earn, '評分': f"{int(f_score)}", '綜合建議': strat['綜合建議'], 
+                        '期權履約價': strat['期權履約價'], '年化報酬': strat['年化報酬'], '最新新聞': l_news
+                    }
+                })
+        except: continue
 
-                identity = '🔍 掃描發現'
-                if is_portfolio: identity = '💼 我的持倉'
-                elif is_hot_sector: identity = '🔥 動態熱門板塊'
-
-                stock_data = {
-                    '身份': identity,
-                    '代碼': ticker, 
-                    '產業板塊': sector,           
-                    '型態': signal_type, 
-                    '現價': round(latest_price, 2),
-                    'RSI': round(latest_rsi, 2), 
-                    '熱度(RVOL)': f"{rvol}x",    
-                    '財報日': days_to_earnings,  
-                    '評分': f"{int(fund_score)}",
-                    '綜合建議': strategy['綜合建議'], 
-                    '期權履約價': strategy['期權履約價'],
-                    '年化報酬': strategy['年化報酬'], 
-                    '最新新聞': latest_news,
-                    '🤖 AI 投研觀點': ai_verdict
-                }
-                results.append(stock_data)
-        except Exception as e:
-            continue
+    # 第二階段：✨ 狙擊手過濾！只取最優秀的 Top 5 餵給 AI
+    raw_candidates.sort(key=lambda x: x['sort_weight'], reverse=True)
+    top_candidates = raw_candidates[:5] # 嚴格限制最多 5 檔！
+    
+    results = []
+    print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，僅針對最頂尖 Top 5 啟動 AI 深度分析，節省時間與算力...")
+    
+    for item in raw_candidates:
+        stock_data = item['data']
+        if item in top_candidates and stock_data['型態'] != "持倉監控": # 持倉監控通常不用浪費 AI 算力
+            print(f"➤ 啟動 AI 狙擊分析: {stock_data['代碼']} ({stock_data['型態']})")
+            ai_verdict = analyze_stock_with_ai(stock_data['代碼'], stock_data['型態'], stock_data['熱度(RVOL)'], item['raw_news'])
+        else:
+            ai_verdict = "⏸️ 系統已記錄 (未達 AI 啟動門檻)"
+            
+        stock_data['🤖 AI 投研觀點'] = ai_verdict
+        results.append(stock_data)
 
     return pd.DataFrame(results)
 
@@ -430,8 +347,7 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
         .high-rvol { color: #e74c3c; font-weight: bold; }
     </style>
     """
-    full_html = f"<html><head>{html_style}</head><body>{body}</body></html>"
-    msg.attach(MIMEText(full_html, 'html'))
+    msg.attach(MIMEText(f"<html><head>{html_style}</head><body>{body}</body></html>", 'html'))
 
     try:
         with smtplib.SMTP('smtp.gmail.com', 587) as server:
@@ -439,8 +355,7 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
             server.login(from_email, app_password)
             server.sendmail(from_email, to_email, msg.as_string())
         print("📧 報告已成功寄出!")
-    except Exception as e:
-        print(f"❌ 寄信失敗: {e}")
+    except Exception as e: print(f"❌ 寄信失敗: {e}")
 
 if __name__ == "__main__":
     ndx_tickers, fetch_status_msg = get_nasdaq_100_tickers()
@@ -448,9 +363,8 @@ if __name__ == "__main__":
     
     target_df = scan_market_opportunities(ndx_tickers, MY_PORTFOLIO, dynamic_hot_sectors)
     
-    subject = f"🧠 量化早報：AI 動態板塊尋標與防護 ({datetime.today().strftime('%Y-%m-%d')})"
-    
-    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🔥 AI 動態板塊鎖定：<b>{hot_sectors_desc}</b> ({len(dynamic_hot_sectors)} 檔)</div>"
+    subject = f"🧠 量化早報：Top 5 狙擊手策略與 AI 觀點 ({datetime.today().strftime('%Y-%m-%d')})"
+    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🔥 AI 動態板塊鎖定：<b>{hot_sectors_desc}</b><br>⚡ 已啟用 Sniper 漏斗機制，大幅降低 API 延遲與限流</div>"
     
     if target_df.empty:
         body = f"{status_html}<h3>今日無符合條件標的</h3>"
@@ -463,15 +377,11 @@ if __name__ == "__main__":
         
         pd.set_option('display.max_colwidth', None)
         html_table = target_df.to_html(index=False, escape=False)
-        
         html_table = html_table.replace('<td>2.', '<td class="high-rvol">🔥 2.')
         html_table = html_table.replace('<td>3.', '<td class="high-rvol">🔥 3.')
         html_table = html_table.replace('<td>4.', '<td class="high-rvol">🔥 4.')
         
-        body = (f"{status_html}"
-                f"<h2>🎯 發現 {len(target_df)} 檔異動標的：</h2>"
-                f"{html_table}")
-        
+        body = (f"{status_html}<h2>🎯 發現 {len(target_df)} 檔異動標的 (僅 Top 5 啟用深度 AI)：</h2>{html_table}")
         body = body.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
         body = body.replace('🟢', '<span style="color:#27ae60; font-weight:bold;">🟢</span>')
         body = body.replace('🔴', '<span style="color:#c0392b; font-weight:bold;">🔴</span>')
@@ -483,10 +393,5 @@ if __name__ == "__main__":
     from_email = os.environ.get("MAIL_USER")
     app_password = os.environ.get("MAIL_PASS")
 
-    if to_email and from_email and app_password:
-        send_scan_report_mail(subject, body, to_email, from_email, app_password)
-    else:
-        print("\n=== 🎯 本地終端機預覽 ===")
-        print(fetch_status_msg)
-        print(f"🔥 AI 動態板塊鎖定: {hot_sectors_desc}")
-        if not target_df.empty: print(target_df.to_markdown(index=False))
+    if to_email and from_email and app_password: send_scan_report_mail(subject, body, to_email, from_email, app_password)
+    else: print("報告產生完成")
