@@ -136,23 +136,63 @@ def get_nasdaq_100_tickers():
     except: return ['AAPL', 'MSFT'], "⚠️ 抓取失敗"
 
 # ==========================================
-# 基本面與策略邏輯
+# 基本面與策略邏輯 (✨ 動態評分系統已修復)
 # ==========================================
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
+    score = 50
+    latest_news_str = "無最新新聞" 
+    sector = "未知板塊"
+    days_to_earnings = "未知"
+    news_list_raw = [] 
+
     try:
         info = ticker_obj.info
-        score = 50
-        sector = info.get('sector', '未知')
+        if not info: raise ValueError("無法獲取 info")
+
+        sector = info.get('sector', '未知板塊')
+        industry = info.get('industry', '')
+        if industry: sector = f"{sector} ({industry})"
+
         earn_ts = info.get('earningsTimestamp')
-        d_earn = "近期發布"
         if earn_ts:
-            days = (datetime.fromtimestamp(earn_ts).date() - datetime.today().date()).days
-            d_earn = f"⚠️ {days}天後" if 0 <= days <= 5 else f"{days}天後"
+            earn_date = datetime.fromtimestamp(earn_ts)
+            days = (earn_date.date() - datetime.today().date()).days
+            if days >= 0:
+                days_to_earnings = f"⚠️ {days}天後" if days <= 5 else f"{days}天後"
+            else:
+                days_to_earnings = "近期已發布"
+
+        current_price = info.get('currentPrice', 0)
+        target_price = info.get('targetMeanPrice', 0)
+        if current_price and target_price and current_price > 0 and target_price > 0:
+            upside = (target_price - current_price) / current_price
+            if upside > 0.15: score += 15
+            elif upside < 0: score -= 15
+
+        rec = info.get('recommendationKey', '')
+        if rec in ['buy', 'strong_buy']: score += 10
+        elif rec in ['sell', 'strong_sell', 'underperform']: score -= 15
+
+        bull_keywords = ['upgrade', 'beat', 'growth', 'surge', 'buy', 'higher', 'record']
+        bear_keywords = ['downgrade', 'miss', 'cut', 'drop', 'lawsuit', 'sell', 'lower', 'weak']
         
-        raw_news = get_robust_news(ticker_obj, ticker_symbol)
-        l_news = "<br>".join([f"▪️ {n['title']}" for n in raw_news[:2]]) if raw_news else "無新聞"
-        return 75, l_news, sector, d_earn, raw_news
-    except: return 50, "數據異常", "未知", "未知", []
+        news_list_raw = get_robust_news(ticker_obj, ticker_symbol)
+        if news_list_raw:
+            news_score = 0
+            news_display = [] 
+            for i, article in enumerate(news_list_raw):
+                title = article.get('title', '')
+                if any(k in title.lower() for k in bull_keywords): news_score += 4
+                if any(k in title.lower() for k in bear_keywords): news_score -= 5
+                if i < 2 and title:
+                    news_display.append(f"▪️ {title}")
+
+            score += news_score
+            if news_display: latest_news_str = "<br><br>".join(news_display)
+
+        return max(0, min(100, score)), latest_news_str, sector, days_to_earnings, news_list_raw
+    except Exception as e:
+        return 50, "數據異常", "未知", "未知", []
 
 def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_to_earnings):
     try:
@@ -332,7 +372,6 @@ if __name__ == "__main__":
         </div>
         """
         
-        # 幫 SOP 上色，視覺更直觀
         html_table = html_table.replace('🥇', '<span style="color:#d35400; font-weight:bold;">🥇</span>')
         html_table = html_table.replace('🥈', '<span style="color:#2980b9; font-weight:bold;">🥈</span>')
         html_table = html_table.replace('🥉', '<span style="color:#8e44ad; font-weight:bold;">🥉</span>')
