@@ -25,9 +25,11 @@ def get_safe_url(b64_str):
     return base64.b64decode(b64_str).decode('utf-8')
 
 # ==========================================
-# API 金鑰與 AI 模型設定
+# API 金鑰與 AI 模型設定 (✨ 指定高容量免費版模型)
 # ==========================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+AI_MODEL_NAME = 'gemini-2.0-flash'  # ✨ 每天有 1500 次免費額度的黃金模型
+
 ai_client = None
 if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -69,10 +71,9 @@ def get_ai_dynamic_sectors(max_retries=2):
     
     for attempt in range(max_retries):
         try:
-            print("🧠 正在請 AI 偵測今日市場最熱門的 3 大板塊...")
-            # ✨ 降級回 1.5 版本，拿回每天 1500 次的龐大免費額度！
+            print(f"🧠 正在請 AI ({AI_MODEL_NAME}) 偵測今日市場最熱門的 3 大板塊...")
             response = ai_client.models.generate_content(
-                model='gemini-1.5-flash',
+                model=AI_MODEL_NAME,
                 contents=prompt
             )
             
@@ -125,13 +126,12 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
     
     for attempt in range(max_retries):
         try:
-            # ✨ 降級回 1.5 版本，拿回每天 1500 次的龐大免費額度！
             response = ai_client.models.generate_content(
-                model='gemini-1.5-flash',
+                model=AI_MODEL_NAME,
                 contents=prompt
             )
             
-            # 1.5 版本的限制是每分鐘 15 次，所以休息 5 秒就很安全了 (1分鐘最多呼叫12次)
+            # 2.0 版本的限制非常寬裕，但為求穩定依然給予 5 秒冷卻
             print(f"[{ticker}] AI 分析完成，冷卻 5 秒以保護免費額度...")
             time.sleep(5) 
             return response.text.replace('\n', '<br>')
@@ -150,7 +150,7 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
     return "⚠️ API 流量限制，請稍後再試"
 
 # ==========================================
-# 🏆 三層瀑布流新聞抓取模組 (結合 Base64 網址防護)
+# 🏆 三層瀑布流新聞抓取模組
 # ==========================================
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
@@ -195,7 +195,7 @@ def get_robust_news(ticker_obj, ticker_symbol):
     return [] 
 
 # ==========================================
-# ✨ 動態抓取 Nasdaq 100 (結合 Base64 網址防護)
+# ✨ 動態抓取 Nasdaq 100
 # ==========================================
 def get_nasdaq_100_tickers():
     print("正在獲取 Nasdaq 100 成分股...")
