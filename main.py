@@ -39,7 +39,7 @@ DAILY_QUOTA_EXHAUSTED = False
 # ==========================================
 # 參數設定區 (持倉)
 # ==========================================
-MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
+MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR', 'MU', 'SNDK', 'AMD', 'CRCL',] 
 
 REQ_SESSION = requests.Session()
 REQ_SESSION.headers.update({
