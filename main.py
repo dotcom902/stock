@@ -12,7 +12,7 @@ import urllib.parse
 import time  
 import json
 import base64  
-import requests  # ✨ 修復：加回標準版的 requests 套件
+import requests  
 from google import genai  
 from curl_cffi import requests as cffi_requests
 
@@ -46,7 +46,7 @@ REQ_SESSION.headers.update({
 })
 
 # ==========================================
-# 🤖 AI 動態板塊尋標器 (具備自動重試機制)
+# 🤖 AI 動態板塊尋標器
 # ==========================================
 def get_ai_dynamic_sectors(max_retries=2):
     fallback_tickers = ['RKLB', 'ASTS', 'BKSY', 'LITE', 'COHR', 'AMD', 'ARM', 'SMCI', 'MARA']
@@ -70,8 +70,9 @@ def get_ai_dynamic_sectors(max_retries=2):
     for attempt in range(max_retries):
         try:
             print("🧠 正在請 AI 偵測今日市場最熱門的 3 大板塊...")
+            # ✨ 降級回 1.5 版本，拿回每天 1500 次的龐大免費額度！
             response = ai_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-1.5-flash',
                 contents=prompt
             )
             
@@ -89,8 +90,8 @@ def get_ai_dynamic_sectors(max_retries=2):
         except Exception as e:
             error_msg = str(e)
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                print(f"⚠️ 獲取板塊觸發 API 流量限制，等待 30 秒後重試...")
-                time.sleep(30)
+                print(f"⚠️ 獲取板塊觸發 API 流量限制，等待 15 秒後重試...")
+                time.sleep(15)
             else:
                 print(f"⚠️ AI 獲取動態板塊失敗 ({e})，使用備用清單。")
                 return fallback_tickers, fallback_desc
@@ -98,7 +99,7 @@ def get_ai_dynamic_sectors(max_retries=2):
     return fallback_tickers, fallback_desc
 
 # ==========================================
-# 🤖 AI 自動化審查代理 (✨ 加入智慧防禦重試機制)
+# 🤖 AI 自動化審查代理
 # ==========================================
 def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=3):
     if not ai_client: return "⚠️ 未設定 API Key"
@@ -124,19 +125,21 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
     
     for attempt in range(max_retries):
         try:
+            # ✨ 降級回 1.5 版本，拿回每天 1500 次的龐大免費額度！
             response = ai_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-1.5-flash',
                 contents=prompt
             )
             
-            print(f"[{ticker}] AI 分析完成，冷卻 8 秒以保護免費額度...")
-            time.sleep(8) 
+            # 1.5 版本的限制是每分鐘 15 次，所以休息 5 秒就很安全了 (1分鐘最多呼叫12次)
+            print(f"[{ticker}] AI 分析完成，冷卻 5 秒以保護免費額度...")
+            time.sleep(5) 
             return response.text.replace('\n', '<br>')
             
         except Exception as e:
             error_msg = str(e)
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "Quota" in error_msg:
-                wait_time = 35 + (attempt * 10) 
+                wait_time = 20 + (attempt * 10) 
                 print(f"[{ticker}] 觸發免費額度限制 (429)，自動暫停 {wait_time} 秒後重試 (第 {attempt+1} 次)...")
                 time.sleep(wait_time)
             else:
