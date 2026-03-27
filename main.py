@@ -34,6 +34,9 @@ ai_client = None
 if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# ✨ 建立全域變數，記憶「今日額度是否已耗盡」
+DAILY_QUOTA_EXHAUSTED = False
+
 # ==========================================
 # 參數設定區 (持倉)
 # ==========================================
@@ -48,10 +51,11 @@ REQ_SESSION.headers.update({
 # 🤖 AI 動態板塊尋標器
 # ==========================================
 def get_ai_dynamic_sectors(max_retries=2):
+    global DAILY_QUOTA_EXHAUSTED
     fallback_tickers = ['RKLB', 'ASTS', 'BKSY', 'LITE', 'COHR', 'AMD', 'ARM', 'SMCI', 'MARA']
     fallback_desc = "太空, 矽光子, AI伺服器 (備用預設)"
 
-    if not ai_client: return fallback_tickers, fallback_desc
+    if not ai_client or DAILY_QUOTA_EXHAUSTED: return fallback_tickers, fallback_desc
 
     today_str = datetime.today().strftime('%Y-%m-%d')
     prompt = f"""
@@ -67,7 +71,7 @@ def get_ai_dynamic_sectors(max_retries=2):
     """
     for attempt in range(max_retries):
         try:
-            print(f"🧠 正在請 AI 偵測今日市場最熱門的 3 大板塊...")
+            print(f"🧠 正在請 AI ({AI_MODEL_NAME}) 偵測今日市場最熱門的 3 大板塊...")
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
             data = json.loads(response.text.replace('```json', '').replace('```', '').strip())
             hot_tickers = [ticker.strip().upper() for ticker in data.get("tickers", fallback_tickers)]
@@ -75,8 +79,14 @@ def get_ai_dynamic_sectors(max_retries=2):
             print(f"🔥 AI 動態精選板塊: {hot_sectors_desc}")
             return hot_tickers, hot_sectors_desc
         except Exception as e:
-            if "429" in str(e):
-                time.sleep(10)
+            error_msg = str(e)
+            if "PerDay" in error_msg or ("limit" in error_msg.lower() and "429" in error_msg):
+                print(f"🚨 偵測到 API 「每日」免費額度已耗盡！切換為靜默模式。")
+                DAILY_QUOTA_EXHAUSTED = True
+                return fallback_tickers, fallback_desc
+            elif "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                print(f"⚠️ 觸發頻率限制，等待 15 秒後重試...")
+                time.sleep(15)
             else:
                 return fallback_tickers, fallback_desc
     return fallback_tickers, fallback_desc
@@ -85,6 +95,8 @@ def get_ai_dynamic_sectors(max_retries=2):
 # 🤖 AI 自動化審查代理
 # ==========================================
 def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=2):
+    global DAILY_QUOTA_EXHAUSTED
+    if DAILY_QUOTA_EXHAUSTED: return "⚠️ 今日 API 免費額度已耗盡"
     if not ai_client: return "⚠️ 未設定 API Key"
     if not news_list_raw: return "無足夠新聞資訊"
     
@@ -96,9 +108,9 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
     {news_text}
 
     量化法則：
-    1. 【超跌反彈】：若僅為大盤回調或情緒錯殺，判定【可以建倉】。
-    2. 【動能突破】：若有實質利多（超預期、新訂單），判定【可以建倉】。
-    3. 【一票否決】：若為結構性破壞（假帳、掉單、訴訟），判定【高風險避開】。
+    1. 【超跌反彈/強勢回檔】：若僅為大盤回調或情緒錯殺，判定【可以建倉】。
+    2. 【動能突破/板塊異動】：若有實質利多（超預期、新訂單），判定【可以建倉】。
+    3. 【一票否決】：若為結構性破壞（假帳、掉單、訴訟、高管離職），判定【高風險避開】。
 
     格式：50字內分析理由。結論：【可以建倉】或【高風險避開】。
     """
@@ -107,10 +119,16 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
         try:
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
             print(f"[{ticker}] AI 分析完成。")
-            time.sleep(4) # 縮短冷卻時間，因為我們只分析 5 檔
+            time.sleep(4) 
             return response.text.replace('\n', '<br>')
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            error_msg = str(e)
+            if "PerDay" in error_msg or ("limit" in error_msg.lower() and "429" in error_msg):
+                print(f"[{ticker}] 🚨 偵測到「每日」額度耗盡，停止今日 AI 呼叫。")
+                DAILY_QUOTA_EXHAUSTED = True
+                return "⚠️ 今日 API 免費額度已耗盡"
+            elif "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                print(f"[{ticker}] 觸發頻率限制，暫停 15 秒...")
                 time.sleep(15)
             else:
                 return "AI 伺服器忙線中"
@@ -235,7 +253,7 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_
         else: return {'綜合建議': '⚪ 持有觀望', '期權履約價': '-', '年化報酬': '-'}
 
 # ==========================================
-# 主掃描函數 (✨ 新增 Top 5 狙擊手過濾邏輯)
+# 主掃描函數 (Top 5 狙擊手過濾邏輯 + SOP 生成)
 # ==========================================
 def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
@@ -247,7 +265,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
     
     raw_candidates = []
     
-    # 第一階段：快速篩選出有訊號的股票 (不呼叫 AI)
     for ticker in df_closes.columns:
         try:
             close_prices, volumes = df_closes[ticker].dropna(), df_volumes[ticker].dropna()
@@ -270,7 +287,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
             is_portfolio, is_hot_sector = ticker in portfolio_list, ticker in hot_sectors_list
             signal_type = None
 
-            # ✨ 融入你的洞察：熱門板塊不抓超跌，只抓強勢回檔或突破
             if is_hot_sector:
                 if latest_rsi > 65 and bias_20 > 5 and vol_surge: signal_type = "動能突破"
                 elif 40 <= latest_rsi <= 55 and bias_20 > -3 and vol_surge: signal_type = "強勢回檔"
@@ -289,8 +305,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
                 if signal_type == "持倉監控": strat['綜合建議'] = "🔹 日常追蹤" if f_score >= 50 else "⚠️ 留意停損"
 
                 identity = '💼 我的持倉' if is_portfolio else ('🔥 動態熱門板塊' if is_hot_sector else '🔍 掃描發現')
-                
-                # 計算排序權重 (持倉優先，再來評分高、熱度高)
                 sort_weight = (1000 if is_portfolio else 0) + f_score + (rvol * 10)
 
                 raw_candidates.append({
@@ -304,22 +318,39 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
                 })
         except: continue
 
-    # 第二階段：✨ 狙擊手過濾！只取最優秀的 Top 5 餵給 AI
     raw_candidates.sort(key=lambda x: x['sort_weight'], reverse=True)
-    top_candidates = raw_candidates[:5] # 嚴格限制最多 5 檔！
+    top_candidates = raw_candidates[:5] 
     
     results = []
-    print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，僅針對最頂尖 Top 5 啟動 AI 深度分析，節省時間與算力...")
+    print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，僅針對最頂尖 Top 5 啟動 AI 深度分析與 SOP 判定...")
     
     for item in raw_candidates:
         stock_data = item['data']
-        if item in top_candidates and stock_data['型態'] != "持倉監控": # 持倉監控通常不用浪費 AI 算力
+        # 1. 呼叫 AI (僅限 Top 5 且非單純持倉監控)
+        if item in top_candidates and stock_data['型態'] != "持倉監控": 
             print(f"➤ 啟動 AI 狙擊分析: {stock_data['代碼']} ({stock_data['型態']})")
             ai_verdict = analyze_stock_with_ai(stock_data['代碼'], stock_data['型態'], stock_data['熱度(RVOL)'], item['raw_news'])
         else:
             ai_verdict = "⏸️ 系統已記錄 (未達 AI 啟動門檻)"
             
         stock_data['🤖 AI 投研觀點'] = ai_verdict
+
+        # 2. ✨ 新增：SOP 實戰提示自動判定邏輯
+        sop_prompt = "⚪ 觀望或依原定策略"
+        if "高風險避開" in ai_verdict or "⚠️" in ai_verdict:
+            sop_prompt = "🛑 AI 否決：結構性風險，直接放棄。"
+        elif "⚠️" in stock_data['財報日']:
+            sop_prompt = "🛑 財報將近：禁止 Sell Put 避免跳空。"
+        elif stock_data['型態'] == "強勢回檔" and "熱門板塊" in stock_data['身份']:
+            sop_prompt = "🥇 情境A (熱門回檔)：建倉 Bull Put Spread，獲利 50%~70% 即平倉。"
+        elif stock_data['型態'] in ["動能突破", "板塊異動(爆量)"] and float(stock_data['熱度(RVOL)'].replace('x', '')) > 1.5:
+            sop_prompt = "🥈 情境B (帶量突破)：買入正股或 Call，🚨 嚴格設定 8%~10% 移動停損。"
+        elif stock_data['型態'] == "超跌反彈" and "熱門板塊" not in stock_data['身份'] and int(stock_data['評分']) >= 70:
+            sop_prompt = "🥉 情境C (優質錯殺)：保守 Sell Put 收租，正股跌破 20MA 即停損。"
+        elif stock_data['型態'] == "持倉監控":
+            sop_prompt = "🔹 紀律：正股跌破 20MA 無條件出場。"
+            
+        stock_data['🎯 SOP 操作提示'] = sop_prompt
         results.append(stock_data)
 
     return pd.DataFrame(results)
@@ -341,9 +372,9 @@ def send_scan_report_mail(subject, body, to_email, from_email, app_password):
         th { background-color: #2c3e50; color: white; padding: 10px 5px; text-align: center; }
         td { border: 1px solid #bdc3c7; padding: 8px 5px; text-align: center; word-wrap: break-word; vertical-align: middle; }
         tr:nth-child(even) { background-color: #f8f9fa; }
-        th:nth-last-child(2) { width: 18%; } 
-        th:last-child { width: 18%; background-color: #8e44ad; } 
-        td:nth-last-child(2), td:last-child { text-align: left; font-size: 11px; color: #34495e; line-height: 1.4; }
+        th:nth-last-child(2), th:last-child { width: 15%; } /* 調整欄寬以適應 SOP */
+        th:last-child { background-color: #d35400; } /* SOP 欄位用亮色 */
+        td:nth-last-child(3), td:nth-last-child(2), td:last-child { text-align: left; font-size: 11px; line-height: 1.4; }
         .high-rvol { color: #e74c3c; font-weight: bold; }
     </style>
     """
@@ -364,7 +395,7 @@ if __name__ == "__main__":
     target_df = scan_market_opportunities(ndx_tickers, MY_PORTFOLIO, dynamic_hot_sectors)
     
     subject = f"🧠 量化早報：Top 5 狙擊手策略與 AI 觀點 ({datetime.today().strftime('%Y-%m-%d')})"
-    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🔥 AI 動態板塊鎖定：<b>{hot_sectors_desc}</b><br>⚡ 已啟用 Sniper 漏斗機制，大幅降低 API 延遲與限流</div>"
+    status_html = f"<div class='status-box'>{fetch_status_msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🔥 AI 動態板塊鎖定：<b>{hot_sectors_desc}</b><br>⚡ 已啟用 Sniper 漏斗機制與 SOP 實戰自動提示</div>"
     
     if target_df.empty:
         body = f"{status_html}<h3>今日無符合條件標的</h3>"
@@ -377,11 +408,30 @@ if __name__ == "__main__":
         
         pd.set_option('display.max_colwidth', None)
         html_table = target_df.to_html(index=False, escape=False)
+        
+        # 幫表格內的重點加上顏色
         html_table = html_table.replace('<td>2.', '<td class="high-rvol">🔥 2.')
         html_table = html_table.replace('<td>3.', '<td class="high-rvol">🔥 3.')
         html_table = html_table.replace('<td>4.', '<td class="high-rvol">🔥 4.')
+        html_table = html_table.replace('🥇', '<span style="color:#d35400; font-weight:bold;">🥇</span>')
+        html_table = html_table.replace('🥈', '<span style="color:#2980b9; font-weight:bold;">🥈</span>')
+        html_table = html_table.replace('🥉', '<span style="color:#8e44ad; font-weight:bold;">🥉</span>')
+        html_table = html_table.replace('🛑', '<span style="color:#c0392b; font-weight:bold;">🛑</span>')
         
-        body = (f"{status_html}<h2>🎯 發現 {len(target_df)} 檔異動標的 (僅 Top 5 啟用深度 AI)：</h2>{html_table}")
+        # ✨ 新增：信件最底部的 SOP 鐵律提醒區塊
+        sop_reminder_html = """
+        <div style="background-color: #fdfbf7; border: 1px solid #e8e0d5; padding: 15px; margin-top: 25px; border-radius: 5px;">
+            <h3 style="color: #d35400; margin-top: 0;">🛡️ 狙擊手 SOP 實戰鐵律提醒</h3>
+            <ul style="font-size: 13px; color: #444; line-height: 1.6;">
+                <li><b>🥇 情境 A (熱門股強勢回檔)：</b>採用 <b>Bull Put Spread (賣權多頭價差)</b> 鎖定下檔風險，獲利 50%~70% 提早入袋。</li>
+                <li><b>🥈 情境 B (帶量動能突破)：</b>追擊正股或買 Call，<b>絕對要設定 8%~10% 移動停損</b>，嚴防假突破。</li>
+                <li><b>🥉 情境 C (優質權值股錯殺)：</b>執行 <b>Sell Put</b> 收取高額權利金，萬一正股跌破 20MA 則無條件出場觀望。</li>
+                <li><b>🛑 絕對避開：</b>AI 判定【高風險避開】、財報 5 天內、無量假突破，一律管好手不碰。</li>
+            </ul>
+        </div>
+        """
+        
+        body = (f"{status_html}<h2>🎯 發現 {len(target_df)} 檔異動標的：</h2>{html_table}{sop_reminder_html}")
         body = body.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
         body = body.replace('🟢', '<span style="color:#27ae60; font-weight:bold;">🟢</span>')
         body = body.replace('🔴', '<span style="color:#c0392b; font-weight:bold;">🔴</span>')
