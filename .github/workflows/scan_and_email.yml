@@ -2,7 +2,7 @@ name: Daily Stock Scan & Email
 
 on:
   schedule:
-    - cron: '30 14 * * 1-5'
+    - cron: '25 14 * * 1-5'
   workflow_dispatch:
 
 jobs:
