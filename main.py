@@ -30,12 +30,12 @@ if GEMINI_API_KEY:
 
 DAILY_QUOTA_EXHAUSTED = False
 
-MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
+MY_PORTFOLIO = ['NVDA', 'TSM', 'CRWV', 'PLTR', 'MSTR'] 
 
 CORE_WATCHLIST = [
     'COHR', 'LITE', 'FN', 'NTAP',       
     'AMD', 'ARM', 'MU', 'SNDK', 'SMCI', 
-    'ASTS', 'RKLB', 'LUNR', 'BKSY'      
+    'ASTS', 'RKLB', 'LUNR', 'BKSY',      
 ]
 
 REQ_SESSION = requests.Session()
@@ -44,24 +44,29 @@ REQ_SESSION.headers.update({
 })
 
 # ==========================================
-# 📈 ✨新增：大盤環境風向標 (Market Regime)
+# 📈 大盤環境風向標 (修正 yfinance 抓取穩定度)
 # ==========================================
 def get_market_trend():
     try:
-        df = yf.download(['SPY', 'QQQ'], period="2mo", progress=False)['Close']
         status = []
         is_bearish = False
         for ticker in ['SPY', 'QQQ']:
-            prices = df[ticker].dropna()
+            df = yf.download(ticker, period="2mo", progress=False)
+            if df.empty or 'Close' not in df: continue
+            
+            # 處理 yfinance 可能返回的 Series 或 DataFrame 格式
+            prices = df['Close'][ticker].dropna() if isinstance(df['Close'], pd.DataFrame) else df['Close'].dropna()
+            
             if len(prices) < 20: continue
             current = float(prices.iloc[-1])
             ma20 = float(prices.rolling(20).mean().iloc[-1])
+            
             if current < ma20:
                 status.append(f"{ticker}: 🔴破月線")
                 is_bearish = True
             else:
                 status.append(f"{ticker}: 🟢多頭")
-        return " | ".join(status), is_bearish
+        return " | ".join(status) if status else "大盤狀態: 未知", is_bearish
     except Exception as e:
         return "大盤狀態: 未知", False
 
@@ -138,16 +143,13 @@ def get_nasdaq_100_tickers():
             if 'Ticker' in table.columns: return table['Ticker'].tolist(), "✅ Nasdaq 100 成功"
     except: return ['AAPL', 'MSFT'], "⚠️ 抓取失敗"
 
-# ==========================================
-# 基本面與策略邏輯 (✨新增 Upside 輸出)
-# ==========================================
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     score = 50
     latest_news_str = "無最新新聞" 
     sector = "未知板塊"
     days_to_earnings = "未知"
     news_list_raw = [] 
-    upside_str = "-" # 新增預設 Upside
+    upside_str = "-" 
 
     try:
         info = ticker_obj.info
@@ -169,7 +171,6 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
         current_price = info.get('currentPrice', 0)
         target_price = info.get('targetMeanPrice', 0)
         
-        # ✨ 計算並輸出 Upside
         if current_price and target_price and current_price > 0 and target_price > 0:
             upside = (target_price - current_price) / current_price
             if upside > 0:
@@ -276,7 +277,7 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, is
                     'sort_weight': sort_weight, 'raw_news': raw_news,
                     'data': {
                         '身份': identity, '代碼': ticker, '型態': signal_type, '現價': round(latest_price, 2),
-                        'Upside': upside_val, # ✨ 寫入資料表
+                        'Upside': upside_val, 
                         'RSI': round(latest_rsi, 2), '熱度(RVOL)': f"{rvol}x", '財報日': d_earn, '評分': int(f_score),
                         '綜合建議': strat['綜合建議'], '期權履約價': strat['期權履約價'], '最新新聞': l_news
                     }
@@ -284,14 +285,20 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, is
         except: continue
 
     raw_candidates.sort(key=lambda x: x['sort_weight'], reverse=True)
-    top_5 = raw_candidates[:5]
+    
+    # ✨ 終極修復：分離 AI 算力額度
+    # 只把「真正觸發進出場訊號」的標的送給 AI，過濾掉單純的「持倉監控」與不需要 AI 的盤整
+    ai_target_candidates = [
+        item for item in raw_candidates 
+        if item['data']['型態'] not in ["持倉監控", "高檔震盪", "趨勢破壞", "極端超買"]
+    ][:5]
+    
+    print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，僅針對最頂尖 {len(ai_target_candidates)} 檔觸發訊號標的啟動 AI 分析...")
     
     results = []
-    print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，僅針對最頂尖 Top 5 啟動 AI 深度分析與 SOP 判定...")
-    
     for item in raw_candidates:
         stock = item['data']
-        if item in top_5 and stock['型態'] not in ["持倉監控", "高檔震盪", "趨勢破壞"]:
+        if item in ai_target_candidates:
             print(f"➤ 啟動 AI 狙擊分析: {stock['代碼']} ({stock['型態']})")
             stock['🤖 AI 投研觀點'] = analyze_stock_with_ai(stock['代碼'], stock['型態'], stock['熱度(RVOL)'], item['raw_news'])
         else:
@@ -345,7 +352,7 @@ def send_scan_report_mail(subject, body, to_emails_str, from_email, app_password
 if __name__ == "__main__":
     ndx, msg = get_nasdaq_100_tickers()
     hot_tickers, hot_desc = get_ai_dynamic_sectors()
-    market_status, is_bearish = get_market_trend() # ✨ 獲取大盤狀態
+    market_status, is_bearish = get_market_trend() 
     
     combined_hot_sectors_list = list(set(hot_tickers + CORE_WATCHLIST))
     target_df = scan_market_opportunities(ndx, MY_PORTFOLIO, combined_hot_sectors_list, is_bearish)
@@ -367,7 +374,6 @@ if __name__ == "__main__":
         </style>
         """
         
-        # ✨ 在信件頂部顯示大盤狀態
         status_html = f"<div class='status-box'><b>📊 大盤狀態：{market_status}</b><br>{msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🎯 核心必掃雷達：啟動 (光通信/半導體/太空)<br>🔥 AI 動態板塊：<b>{hot_desc}</b></div>"
         
         sop_reminder_html = """
