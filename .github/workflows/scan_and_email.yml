@@ -28,4 +28,4 @@ jobs:
           pip install yfinance pandas requests lxml html5lib curl_cffi google-genai
           
       - name: Run stock scan and email
-        run: python main.py
+        run: python main.py #run
