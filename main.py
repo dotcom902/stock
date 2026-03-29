@@ -18,15 +18,9 @@ from curl_cffi import requests as cffi_requests
 
 warnings.filterwarnings('ignore')
 
-# ==========================================
-# 🛡️ 網址防護函數
-# ==========================================
 def get_safe_url(b64_str):
     return base64.b64decode(b64_str).decode('utf-8')
 
-# ==========================================
-# API 金鑰與 AI 模型設定 
-# ==========================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 AI_MODEL_NAME = 'gemini-2.0-flash'  
 
@@ -36,16 +30,12 @@ if GEMINI_API_KEY:
 
 DAILY_QUOTA_EXHAUSTED = False
 
-# ==========================================
-# 💼 參數設定區 (持倉與核心監控名單)
-# ==========================================
 MY_PORTFOLIO = ['NVDA', 'TSM', 'AVGO', 'PLTR', 'MSTR'] 
 
-# ✨ 三大熱門領域「頭部必掃名單」 
 CORE_WATCHLIST = [
-    'COHR', 'LITE', 'FN', 'NTAP',       # 📡 光通信 / 矽光子
-    'AMD', 'ARM', 'MU', 'SNDK', 'SMCI', # 💻 先進半導體 / 記憶體
-    'ASTS', 'RKLB', 'LUNR', 'BKSY'      # 🚀 太空領域
+    'COHR', 'LITE', 'FN', 'NTAP',       
+    'AMD', 'ARM', 'MU', 'SNDK', 'SMCI', 
+    'ASTS', 'RKLB', 'LUNR', 'BKSY'      
 ]
 
 REQ_SESSION = requests.Session()
@@ -54,8 +44,27 @@ REQ_SESSION.headers.update({
 })
 
 # ==========================================
-# 🤖 AI 動態板塊尋標器
+# 📈 ✨新增：大盤環境風向標 (Market Regime)
 # ==========================================
+def get_market_trend():
+    try:
+        df = yf.download(['SPY', 'QQQ'], period="2mo", progress=False)['Close']
+        status = []
+        is_bearish = False
+        for ticker in ['SPY', 'QQQ']:
+            prices = df[ticker].dropna()
+            if len(prices) < 20: continue
+            current = float(prices.iloc[-1])
+            ma20 = float(prices.rolling(20).mean().iloc[-1])
+            if current < ma20:
+                status.append(f"{ticker}: 🔴破月線")
+                is_bearish = True
+            else:
+                status.append(f"{ticker}: 🟢多頭")
+        return " | ".join(status), is_bearish
+    except Exception as e:
+        return "大盤狀態: 未知", False
+
 def get_ai_dynamic_sectors(max_retries=2):
     global DAILY_QUOTA_EXHAUSTED
     fallback_tickers = ['MARA', 'IREN', 'SYM', 'PATH', 'CRWD']
@@ -72,7 +81,7 @@ def get_ai_dynamic_sectors(max_retries=2):
     """
     for attempt in range(max_retries):
         try:
-            print(f"🧠 正在請 AI ({AI_MODEL_NAME}) 偵測今日熱門板塊...")
+            print(f"🧠 正在請 AI 偵測今日熱門板塊...")
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
             data = json.loads(response.text.replace('```json', '').replace('```', '').strip())
             return [t.strip().upper() for t in data.get("tickers", fallback_tickers)], data.get("sector_names", fallback_desc)
@@ -81,9 +90,6 @@ def get_ai_dynamic_sectors(max_retries=2):
             else: return fallback_tickers, fallback_desc
     return fallback_tickers, fallback_desc
 
-# ==========================================
-# 🤖 AI 自動化審查代理
-# ==========================================
 def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=2):
     global DAILY_QUOTA_EXHAUSTED
     if DAILY_QUOTA_EXHAUSTED or not ai_client: return "⚠️ AI 暫停分析"
@@ -107,9 +113,6 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
             else: return "AI 伺服器忙線"
     return "⚠️ 系統節流跳過"
 
-# ==========================================
-# 🏆 新聞與 Nasdaq 100 抓取
-# ==========================================
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
     try:
@@ -136,7 +139,7 @@ def get_nasdaq_100_tickers():
     except: return ['AAPL', 'MSFT'], "⚠️ 抓取失敗"
 
 # ==========================================
-# 基本面與策略邏輯 (✨ 動態評分系統已修復)
+# 基本面與策略邏輯 (✨新增 Upside 輸出)
 # ==========================================
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     score = 50
@@ -144,6 +147,7 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     sector = "未知板塊"
     days_to_earnings = "未知"
     news_list_raw = [] 
+    upside_str = "-" # 新增預設 Upside
 
     try:
         info = ticker_obj.info
@@ -164,8 +168,15 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
 
         current_price = info.get('currentPrice', 0)
         target_price = info.get('targetMeanPrice', 0)
+        
+        # ✨ 計算並輸出 Upside
         if current_price and target_price and current_price > 0 and target_price > 0:
             upside = (target_price - current_price) / current_price
+            if upside > 0:
+                upside_str = f"<span style='color:#27ae60;font-weight:bold;'>+{round(upside*100, 1)}%</span>"
+            else:
+                upside_str = f"<span style='color:#c0392b;'>{round(upside*100, 1)}%</span>"
+                
             if upside > 0.15: score += 15
             elif upside < 0: score -= 15
 
@@ -190,9 +201,9 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
             score += news_score
             if news_display: latest_news_str = "<br><br>".join(news_display)
 
-        return max(0, min(100, score)), latest_news_str, sector, days_to_earnings, news_list_raw
+        return max(0, min(100, score)), latest_news_str, sector, days_to_earnings, news_list_raw, upside_str
     except Exception as e:
-        return 50, "數據異常", "未知", "未知", []
+        return 50, "數據異常", "未知", "未知", [], "-"
 
 def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_to_earnings):
     try:
@@ -206,7 +217,7 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_
 # ==========================================
 # 🎯 狙擊手核心掃描與全天候 SOP
 # ==========================================
-def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
+def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, is_market_bearish):
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
     df_data = yf.download(all_tickers, period="3mo", progress=False) 
     df_closes, df_volumes = df_data['Close'], df_data['Volume']
@@ -217,27 +228,25 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
             prices = df_closes[ticker].dropna()
             if len(prices) < 20: continue
             
-            # 技術面指標計算
             delta = prices.diff()
             gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
             loss = -delta.clip(upper=0).ewm(alpha=1/14, adjust=False).mean()
             rsi = (100 - (100 / (1 + gain / loss))).replace([np.inf, -np.inf], np.nan).fillna(100)
-            latest_rsi = rsi.iloc[-1]
-            latest_price = prices.iloc[-1]
-            bias_20 = ((latest_price - prices.rolling(20).mean().iloc[-1]) / prices.rolling(20).mean().iloc[-1]) * 100
+            latest_rsi = float(rsi.iloc[-1])
+            latest_price = float(prices.iloc[-1])
+            bias_20 = ((latest_price - float(prices.rolling(20).mean().iloc[-1])) / float(prices.rolling(20).mean().iloc[-1])) * 100
             
             volumes = df_volumes[ticker].dropna()
             rvol, vol_surge = 0.0, False
             if len(volumes) >= 20:
-                vol_ma20 = volumes.rolling(20).mean().iloc[-1]
+                vol_ma20 = float(volumes.rolling(20).mean().iloc[-1])
                 if pd.notna(vol_ma20) and vol_ma20 > 0:
-                    rvol = round(volumes.iloc[-1] / vol_ma20, 2)
+                    rvol = round(float(volumes.iloc[-1]) / vol_ma20, 2)
                     vol_surge = rvol > 1.2 
             
             is_portfolio, is_hot = ticker in portfolio_list, ticker in hot_sectors_list
             signal_type = None
             
-            # ✨ 全天候熱門股 5 大生命週期判定
             if is_hot:
                 if latest_rsi >= 75 and bias_20 >= 10: signal_type = "極端超買"
                 elif latest_rsi > 65 and bias_20 > 5 and vol_surge: signal_type = "動能突破"
@@ -253,14 +262,13 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
             
             if signal_type:
                 stock_obj = yf.Ticker(ticker)
-                f_score, l_news, sector, d_earn, raw_news = get_fundamental_sentiment_score(stock_obj, ticker)
+                f_score, l_news, sector, d_earn, raw_news, upside_val = get_fundamental_sentiment_score(stock_obj, ticker)
                 strat = get_investment_strategy(stock_obj, latest_price, f_score, signal_type, d_earn)
                 
                 if signal_type == "持倉監控": strat['綜合建議'] = "🔹 日常追蹤" if f_score >= 50 else "⚠️ 留意停損"
 
                 identity = '💼 我的持倉' if is_portfolio else ('🔥 動態熱門板塊' if is_hot else '🔍 掃描發現')
                 
-                # 權重計算：極端訊號優先處理
                 weight_multiplier = 20 if signal_type in ["強勢回檔", "動能突破", "極端超買"] else 10
                 sort_weight = (1000 if is_portfolio else 0) + f_score + (rvol * weight_multiplier)
                 
@@ -268,8 +276,9 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
                     'sort_weight': sort_weight, 'raw_news': raw_news,
                     'data': {
                         '身份': identity, '代碼': ticker, '型態': signal_type, '現價': round(latest_price, 2),
+                        'Upside': upside_val, # ✨ 寫入資料表
                         'RSI': round(latest_rsi, 2), '熱度(RVOL)': f"{rvol}x", '財報日': d_earn, '評分': int(f_score),
-                        '綜合建議': strat['綜合建議'], '期權履約價': strat['期權履約價'], '年化報酬': strat['年化報酬'], '最新新聞': l_news
+                        '綜合建議': strat['綜合建議'], '期權履約價': strat['期權履約價'], '最新新聞': l_news
                     }
                 })
         except: continue
@@ -282,17 +291,15 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
     
     for item in raw_candidates:
         stock = item['data']
-        # 僅限 Top 5 且非純粹持倉監控/高檔震盪去呼叫 AI (節省額度)
         if item in top_5 and stock['型態'] not in ["持倉監控", "高檔震盪", "趨勢破壞"]:
             print(f"➤ 啟動 AI 狙擊分析: {stock['代碼']} ({stock['型態']})")
             stock['🤖 AI 投研觀點'] = analyze_stock_with_ai(stock['代碼'], stock['型態'], stock['熱度(RVOL)'], item['raw_news'])
         else:
             stock['🤖 AI 投研觀點'] = "⏸️ 系統已記錄 / 無需 AI 介入"
         
-        # ✨ 終極 SOP 分發大腦
         sop = "⚪ 觀望或依原定策略"
         if "高風險" in stock['🤖 AI 投研觀點'] or "⚠️" in stock['🤖 AI 投研觀點']: 
-            sop = "🛑 AI 否決：結構性風險，直接放棄。"
+            sop = "🛑 AI 否決：風險過高，直接放棄。"
         elif "⚠️" in stock['財報日']: 
             sop = "🛑 財報將近：禁止 Sell Put 避免跳空。"
         elif "趨勢破壞" in stock['型態']: 
@@ -308,13 +315,15 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list):
         elif "超跌反彈" in stock['型態']: 
             sop = "🥉 情境C (優質錯殺)：保守 Sell Put 收租。"
             
+        # ✨ 大盤防禦機制介入
+        if is_market_bearish:
+            if "情境A" in sop or "情境B" in sop or "情境C" in sop:
+                sop = sop.replace("🥇", "🛡️").replace("🥈", "🛡️").replace("🥉", "🛡️") + "<br><b>(🚨大盤轉弱，建倉必須減半)</b>"
+            
         stock['🎯 SOP 操作提示'] = sop
         results.append(stock)
     return pd.DataFrame(results)
 
-# ==========================================
-# 📧 寄送模組 (支援多人)
-# ==========================================
 def send_scan_report_mail(subject, body, to_emails_str, from_email, app_password):
     recipient_list = [e.strip() for e in to_emails_str.split(',') if e.strip()]
     
@@ -336,9 +345,10 @@ def send_scan_report_mail(subject, body, to_emails_str, from_email, app_password
 if __name__ == "__main__":
     ndx, msg = get_nasdaq_100_tickers()
     hot_tickers, hot_desc = get_ai_dynamic_sectors()
+    market_status, is_bearish = get_market_trend() # ✨ 獲取大盤狀態
     
     combined_hot_sectors_list = list(set(hot_tickers + CORE_WATCHLIST))
-    target_df = scan_market_opportunities(ndx, MY_PORTFOLIO, combined_hot_sectors_list)
+    target_df = scan_market_opportunities(ndx, MY_PORTFOLIO, combined_hot_sectors_list, is_bearish)
     
     if not target_df.empty:
         html_table = target_df.to_html(index=False, escape=False)
@@ -357,15 +367,17 @@ if __name__ == "__main__":
         </style>
         """
         
-        status_html = f"<div class='status-box'>{msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🎯 核心必掃雷達：啟動 (光通信/半導體/太空)<br>🔥 AI 動態板塊：<b>{hot_desc}</b></div>"
+        # ✨ 在信件頂部顯示大盤狀態
+        status_html = f"<div class='status-box'><b>📊 大盤狀態：{market_status}</b><br>{msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🎯 核心必掃雷達：啟動 (光通信/半導體/太空)<br>🔥 AI 動態板塊：<b>{hot_desc}</b></div>"
         
         sop_reminder_html = """
         <div style="background-color: #fdfbf7; border: 1px solid #e8e0d5; padding: 15px; margin-top: 25px; border-radius: 5px;">
             <h3 style="color: #d35400; margin-top: 0;">🛡️ 熱門股全天候 SOP 實戰鐵律</h3>
             <ul style="font-size: 13px; color: #444; line-height: 1.6;">
+                <li><b>📊 大盤防禦機制：</b>若 SPY/QQQ 跌破月線，系統會自動亮起 🛡️，強烈建議多頭部位減半。</li>
+                <li><b>🎯 Upside (潛在空間)：</b>投行目標價距離現價的空間。若呈負數代表溢價嚴重，絕對禁止追高。</li>
                 <li><b>🥇 情境 A (強勢回檔)：</b>採用 <b>Bull Put Spread</b> 鎖定下檔風險，勝率最高。</li>
                 <li><b>🥈 情境 B (動能突破)：</b>追擊正股/買 Call，<b>絕對設定 8% 移動停損</b>，嚴防假突破。</li>
-                <li><b>⏳ 情境 E (高檔震盪)：</b>盤整期，持有正股者可賣 <b>Covered Call</b> 收取超額時間價值。</li>
                 <li><b>⚠️ 情境 D (極端超買)：</b>乖離過大絕對不追！考慮獲利了結或建倉 <b>Bear Call Spread</b>。</li>
                 <li><b>🛑 絕對避開：</b>出現「趨勢破壞 (RSI<40)」、AI 判定風險、財報 5 天內，無條件空手觀望。</li>
             </ul>
@@ -375,6 +387,7 @@ if __name__ == "__main__":
         html_table = html_table.replace('🥇', '<span style="color:#d35400; font-weight:bold;">🥇</span>')
         html_table = html_table.replace('🥈', '<span style="color:#2980b9; font-weight:bold;">🥈</span>')
         html_table = html_table.replace('🥉', '<span style="color:#8e44ad; font-weight:bold;">🥉</span>')
+        html_table = html_table.replace('🛡️', '<span style="color:#34495e; font-weight:bold;">🛡️</span>')
         html_table = html_table.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
         html_table = html_table.replace('⏳', '<span style="color:#7f8c8d; font-weight:bold;">⏳</span>')
         html_table = html_table.replace('🛑', '<span style="color:#c0392b; font-weight:bold;">🛑</span>')
