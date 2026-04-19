@@ -47,12 +47,8 @@ REQ_SESSION.headers.update({
 # 🚦 宏觀紅綠燈大盤防禦機制 (VIX + QQQ RSI)
 # ==========================================
 def get_macro_regime():
-    """
-    結合 VIX 恐慌指數與 QQQ RSI 判定市場風險偏好狀態
-    """
     try:
         print("🌍 正在掃描總體經濟宏觀指標 (QQQ & VIX)...")
-        # 同時抓取 QQQ 與 VIX
         df_data = yf.download(['QQQ', '^VIX'], period="3mo", progress=False)
         
         if df_data.empty or 'Close' not in df_data:
@@ -60,7 +56,6 @@ def get_macro_regime():
             
         df_closes = df_data['Close']
         
-        # 1. 計算 QQQ 14日 RSI
         qqq_prices = df_closes['QQQ'].dropna()
         if len(qqq_prices) < 20: return "大盤狀態: 數據不足", "UNKNOWN"
         
@@ -70,11 +65,9 @@ def get_macro_regime():
         qqq_rsi = (100 - (100 / (1 + gain / loss))).fillna(100)
         latest_qqq_rsi = float(qqq_rsi.iloc[-1])
         
-        # 2. 獲取最新 VIX 指數
         vix_prices = df_closes['^VIX'].dropna()
         latest_vix = float(vix_prices.iloc[-1])
         
-        # 3. 紅綠燈邏輯判定
         signal = "UNKNOWN"
         if latest_vix > 25 or latest_qqq_rsi < 30:
             status_icon = "🔴"
@@ -129,9 +122,9 @@ def get_ai_dynamic_sectors(max_retries=2):
     return fallback_tickers, fallback_desc
 
 # ==========================================
-# 🤖 AI 個股投研分析
+# 🤖 AI 個股投研分析 (加入指數退避防 429)
 # ==========================================
-def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=2):
+def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=4):
     global DAILY_QUOTA_EXHAUSTED
     if DAILY_QUOTA_EXHAUSTED or not ai_client: return "⚠️ AI 暫停分析"
     
@@ -144,15 +137,24 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
     4. 結構/趨勢破壞：一律【高風險避開】。
     格式：50字內理由。結論：【上述四者擇一】。"""
     
+    backoff_time = 5  
+    
     for attempt in range(max_retries):
         try:
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
-            time.sleep(4) 
+            time.sleep(3) 
             return response.text.replace('\n', '<br>')
         except Exception as e:
-            if "429" in str(e): time.sleep(15)
-            else: return "AI 伺服器忙線"
-    return "⚠️ 系統節流跳過"
+            error_msg = str(e).lower()
+            if "429" in error_msg or "quota" in error_msg:
+                print(f"⏳ {ticker} 觸發 AI 限流 (429)，啟動指數退避等待 {backoff_time} 秒... (嘗試 {attempt+1}/{max_retries})")
+                time.sleep(backoff_time)
+                backoff_time *= 2 
+            else:
+                return f"⚠️ 伺服器異常: {str(e)[:15]}"
+                
+    DAILY_QUOTA_EXHAUSTED = True
+    return "⚠️ AI 伺服器忙線 (限流中)"
 
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
@@ -242,17 +244,49 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     except Exception as e:
         return 50, "數據異常", "未知", "未知", [], "-"
 
+# ==========================================
+# 🎯 提取期權策略與 IV 數據
+# ==========================================
 def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_to_earnings):
     try:
         exp_dates = ticker_obj.options
-        target_date = [d for d in exp_dates if 25 <= (datetime.strptime(d, '%Y-%m-%d') - datetime.today()).days <= 45][0]
+        if not exp_dates:
+            raise ValueError("無期權數據")
+            
+        valid_dates = [d for d in exp_dates if 25 <= (datetime.strptime(d, '%Y-%m-%d') - datetime.today()).days <= 45]
+        target_date = valid_dates[0] if valid_dates else exp_dates[0]
+        
         chain = ticker_obj.option_chain(target_date)
-        strike = chain.puts[chain.puts['strike'] <= current_price * 0.9].sort_values(by='strike', ascending=False).iloc[0]['strike']
-        return {'綜合建議': '🟢 可操作期權', '期權履約價': f"Put ${strike} ({target_date})", '年化報酬': '15%+'}
-    except: return {'綜合建議': '⚪ 僅限正股操作', '期權履約價': '-', '年化報酬': '-'}
+        target_puts = chain.puts[chain.puts['strike'] <= current_price * 0.9].sort_values(by='strike', ascending=False)
+        
+        if not target_puts.empty:
+            selected_put = target_puts.iloc[0]
+            strike = selected_put['strike']
+            iv = selected_put['impliedVolatility']
+            
+            if pd.notna(iv) and iv > 0:
+                iv_str = f"{iv*100:.1f}%"
+                if iv > 0.6:
+                    iv_status = f"<span style='color:#c0392b;font-weight:bold;'>{iv_str} (🔥偏高)</span>"
+                elif iv < 0.35:
+                    iv_status = f"<span style='color:#2980b9;'>{iv_str} (🧊偏低)</span>"
+                else:
+                    iv_status = f"{iv_str} (適中)"
+            else:
+                iv_status = "-"
+
+            return {
+                '綜合建議': '🟢 可操作期權', 
+                '期權履約價': f"Put ${strike} ({target_date})", 
+                '當前 IV': iv_status
+            }
+    except Exception as e: 
+        pass
+        
+    return {'綜合建議': '⚪ 僅限正股操作', '期權履約價': '-', '當前 IV': '-'}
 
 # ==========================================
-# 🎯 狙擊手核心掃描與全天候 SOP (導入紅綠燈)
+# 🎯 狙擊手核心掃描與全天候 SOP (導入 IV 與紅綠燈)
 # ==========================================
 def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, macro_signal):
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
@@ -314,7 +348,9 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
                     'data': {
                         '身份': identity, '代碼': ticker, '型態': signal_type, '現價': round(latest_price, 2),
                         'Upside': upside_val, 
-                        'RSI': round(latest_rsi, 2), '熱度(RVOL)': f"{rvol}x", '財報日': d_earn, '評分': int(f_score),
+                        'RSI': round(latest_rsi, 2), '熱度(RVOL)': f"{rvol}x", '財報日': d_earn, 
+                        '當前 IV': strat['當前 IV'],
+                        '評分': int(f_score),
                         '綜合建議': strat['綜合建議'], '期權履約價': strat['期權履約價'], '最新新聞': l_news
                     }
                 })
@@ -337,7 +373,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
         else:
             stock['🤖 AI 投研觀點'] = "⏸️ 系統已記錄 / 無需 AI 介入"
         
-        # 基礎 SOP 判定
         sop = "⚪ 觀望或依原定策略"
         if "高風險" in stock['🤖 AI 投研觀點'] or "⚠️" in stock['🤖 AI 投研觀點']: 
             sop = "🛑 AI 否決：風險過高，直接放棄。"
@@ -390,14 +425,12 @@ def send_scan_report_mail(subject, body, to_emails_str, from_email, app_password
         print(f"❌ 寄信失敗: {e}")
 
 if __name__ == "__main__":
-    # 執行紅綠燈宏觀分析
     macro_desc, macro_signal = get_macro_regime()
     
     ndx, msg = get_nasdaq_100_tickers()
     hot_tickers, hot_desc = get_ai_dynamic_sectors()
     
     combined_hot_sectors_list = list(set(hot_tickers + CORE_WATCHLIST))
-    # 將紅綠燈訊號傳遞給掃描引擎
     target_df = scan_market_opportunities(ndx, MY_PORTFOLIO, combined_hot_sectors_list, macro_signal)
     
     if not target_df.empty:
