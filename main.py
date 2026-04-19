@@ -22,7 +22,7 @@ def get_safe_url(b64_str):
     return base64.b64decode(b64_str).decode('utf-8')
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-AI_MODEL_NAME = 'gemini-2.0-flash'  
+AI_MODEL_NAME = 'gemini-2.5-flash'
 
 ai_client = None
 if GEMINI_API_KEY:
