@@ -22,7 +22,8 @@ def get_safe_url(b64_str):
     return base64.b64decode(b64_str).decode('utf-8')
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-AI_MODEL_NAME = 'gemini-2.5-flash'
+# ✅ 維持使用最強大且您已測試成功的 2.0 Flash 模型
+AI_MODEL_NAME = 'gemini-2.5-flash'  
 
 ai_client = None
 if GEMINI_API_KEY:
@@ -151,7 +152,7 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
                 time.sleep(backoff_time)
                 backoff_time *= 2 
             else:
-                return f"⚠️ 伺服器異常: {str(e)[:15]}"
+                return f"⚠️ 伺服器異常或模型錯誤: {str(e)[:25]}"
                 
     DAILY_QUOTA_EXHAUSTED = True
     return "⚠️ AI 伺服器忙線 (限流中)"
@@ -401,6 +402,17 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
         elif macro_signal == "GREEN":
             if "情境A" in sop or "情境B" in sop:
                 sop = sop + " <br><span style='color:#27ae60;'><b>(🟢 綠燈加持：動能健康，允許佈局)</b></span>"
+                
+        # ⚡ 隱含波動率 (IV) 策略強制寫入 SOP
+        iv_status_str = stock.get('當前 IV', '')
+        if "🔥" in iv_status_str:
+            if "情境A" in sop or "情境C" in sop or "情境E" in sop or "持倉監控" in sop:
+                 sop += "<br><span style='color:#c0392b;'><b>(🔥 IV 高：權金極肥，強烈建議做賣方 Sell Put / Covered Call)</b></span>"
+            elif "情境B" in sop:
+                 sop += "<br><span style='color:#c0392b;'><b>(🔥 IV 高：嚴防 IV Crush，禁止單買 Call，改買正股或做價差)</b></span>"
+        elif "🧊" in iv_status_str:
+            if "情境B" in sop or "情境A" in sop:
+                 sop += "<br><span style='color:#2980b9;'><b>(🧊 IV 低：選擇權便宜，適合直接買入 Call 或正股)</b></span>"
 
         stock['🎯 SOP 操作提示'] = sop
         results.append(stock)
@@ -468,6 +480,7 @@ if __name__ == "__main__":
                 <li><b>🔴 大盤紅燈 (VIX>25 或 QQQ RSI<30)：</b>無條件沒收所有做多買點，嚴禁抄底接刀。</li>
                 <li><b>🟡 大盤黃燈 (QQQ RSI>75 極度貪婪)：</b>取消動能突破追高策略，僅限收租或部位減碼。</li>
                 <li><b>🟢 大盤綠燈 (情緒穩定)：</b>允許全功率執行 🥇情境A(強勢回檔) 與 🥈情境B(動能突破)。</li>
+                <li><b>🔥 IV 偏高策略：</b>權利金極度昂貴，絕對禁止單買期權 (Long Call/Put)，強烈建議當賣方 (Sell Put) 收租。</li>
                 <li><b>🛑 絕對避開：</b>出現「趨勢破壞 (個股RSI<40)」、AI 判定風險、財報 5 天內，無條件空手觀望。</li>
             </ul>
         </div>
