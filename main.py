@@ -22,7 +22,7 @@ def get_safe_url(b64_str):
     return base64.b64decode(b64_str).decode('utf-8')
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-# ✅ 維持使用最強大且您已測試成功的 2.0 Flash 模型
+# ✅ 確認使用最新 2.5 Flash 混合推理模型
 AI_MODEL_NAME = 'gemini-2.5-flash'  
 
 ai_client = None
@@ -95,9 +95,9 @@ def get_macro_regime():
         return "大盤狀態: 未知", "UNKNOWN"
 
 # ==========================================
-# 🧠 AI 熱門板塊動態偵測
+# 🧠 AI 熱門板塊動態偵測 (⚡ 支援 503 重試)
 # ==========================================
-def get_ai_dynamic_sectors(max_retries=2):
+def get_ai_dynamic_sectors(max_retries=3):
     global DAILY_QUOTA_EXHAUSTED
     fallback_tickers = ['MARA', 'IREN', 'SYM', 'PATH', 'CRWD']
     fallback_desc = "AI 應用, 區塊鏈, 網路安全 (備用預設)"
@@ -111,19 +111,25 @@ def get_ai_dynamic_sectors(max_retries=2):
     然後，為這 3 個板塊各挑選 3~4 檔最具代表性、流動性佳的美股股票代碼（總共約 9~12 檔）。
     請以 JSON 格式輸出：{{"sector_names": "名稱", "tickers": ["代碼1"]}}
     """
+    backoff_time = 5
     for attempt in range(max_retries):
         try:
-            print(f"🧠 正在請 AI 偵測今日熱門板塊...")
+            print(f"🧠 正在請 AI 偵測今日熱門板塊... (嘗試 {attempt+1}/{max_retries})")
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
             data = json.loads(response.text.replace('```json', '').replace('```', '').strip())
             return [t.strip().upper() for t in data.get("tickers", fallback_tickers)], data.get("sector_names", fallback_desc)
         except Exception as e:
-            if "429" in str(e): time.sleep(15)
-            else: return fallback_tickers, fallback_desc
+            error_msg = str(e).lower()
+            if "429" in error_msg or "503" in error_msg or "quota" in error_msg:
+                print(f"⏳ AI 板塊掃描觸發伺服器擁塞 (429/503)，等待 {backoff_time} 秒...")
+                time.sleep(backoff_time)
+                backoff_time *= 2
+            else:
+                return fallback_tickers, fallback_desc
     return fallback_tickers, fallback_desc
 
 # ==========================================
-# 🤖 AI 個股投研分析 (加入指數退避防 429)
+# 🤖 AI 個股投研分析 (⚡ 支援 503 重試)
 # ==========================================
 def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=4):
     global DAILY_QUOTA_EXHAUSTED
@@ -147,15 +153,16 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
             return response.text.replace('\n', '<br>')
         except Exception as e:
             error_msg = str(e).lower()
-            if "429" in error_msg or "quota" in error_msg:
-                print(f"⏳ {ticker} 觸發 AI 限流 (429)，啟動指數退避等待 {backoff_time} 秒... (嘗試 {attempt+1}/{max_retries})")
+            # ⚡ 涵蓋 429(限流) 與 503(伺服器忙線) 的完整防護網
+            if "429" in error_msg or "quota" in error_msg or "503" in error_msg:
+                print(f"⏳ {ticker} 觸發 AI 伺服器忙線 (429/503)，等待 {backoff_time} 秒... (嘗試 {attempt+1}/{max_retries})")
                 time.sleep(backoff_time)
                 backoff_time *= 2 
             else:
                 return f"⚠️ 伺服器異常或模型錯誤: {str(e)[:25]}"
                 
     DAILY_QUOTA_EXHAUSTED = True
-    return "⚠️ AI 伺服器忙線 (限流中)"
+    return "⚠️ AI 伺服器持續擁塞 (已達重試上限)"
 
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
@@ -498,6 +505,7 @@ if __name__ == "__main__":
         from_email = os.environ.get("MAIL_USER")
         app_pass = os.environ.get("MAIL_PASS")
         
+        # ✅ 確認郵件標題正確結合日期與紅綠燈狀態
         if to_email and from_email and app_pass:
             send_scan_report_mail(f"🚦 量化早報 ({datetime.today().strftime('%m/%d')}) - {macro_signal}", body, to_email, from_email, app_pass)
         else:
