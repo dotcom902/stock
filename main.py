@@ -358,4 +358,10 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             
         # 🚦 大盤紅綠燈強制覆寫 (Override Mechanism)
         if macro_signal == "RED":
-            if "情境A" in sop or "情境B" in sop or "情境C" in
+            # 🚦 大盤紅綠燈強制覆寫 (Override Mechanism)
+        if macro_signal == "RED":
+            if "情境A" in sop or "情境B" in sop or "情境C" in sop:
+                sop = "🛑 <b>[紅燈警戒]</b> 系統性風險/恐慌蔓延。禁止所有做多建倉！僅限觀望或買入 Put 避險。"
+        elif macro_signal == "YELLOW":
+            if "情境B" in sop:
+                sop = "⚠️ <b>[黃燈警戒]</b> 大盤極端貪婪。禁止突破追高！改為鎖定利潤或觀望。"
