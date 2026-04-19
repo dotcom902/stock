@@ -358,10 +358,101 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             
         # 🚦 大盤紅綠燈強制覆寫 (Override Mechanism)
         if macro_signal == "RED":
-            # 🚦 大盤紅綠燈強制覆寫 (Override Mechanism)
-        if macro_signal == "RED":
             if "情境A" in sop or "情境B" in sop or "情境C" in sop:
                 sop = "🛑 <b>[紅燈警戒]</b> 系統性風險/恐慌蔓延。禁止所有做多建倉！僅限觀望或買入 Put 避險。"
         elif macro_signal == "YELLOW":
             if "情境B" in sop:
                 sop = "⚠️ <b>[黃燈警戒]</b> 大盤極端貪婪。禁止突破追高！改為鎖定利潤或觀望。"
+        elif macro_signal == "GREEN":
+            if "情境A" in sop or "情境B" in sop:
+                sop = sop + " <br><span style='color:#27ae60;'><b>(🟢 綠燈加持：動能健康，允許佈局)</b></span>"
+
+        stock['🎯 SOP 操作提示'] = sop
+        results.append(stock)
+    return pd.DataFrame(results)
+
+def send_scan_report_mail(subject, body, to_emails_str, from_email, app_password):
+    recipient_list = [e.strip() for e in to_emails_str.split(',') if e.strip()]
+    
+    msg = MIMEMultipart()
+    msg['From'] = from_email
+    msg['To'] = to_emails_str
+    msg['Subject'] = subject
+    msg.attach(MIMEText(f"<html><body>{body}</body></html>", 'html'))
+    
+    try:
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(from_email, app_password)
+            server.sendmail(from_email, recipient_list, msg.as_string())
+        print(f"📧 報告已成功寄送至 {len(recipient_list)} 位收件人!")
+    except Exception as e: 
+        print(f"❌ 寄信失敗: {e}")
+
+if __name__ == "__main__":
+    # 執行紅綠燈宏觀分析
+    macro_desc, macro_signal = get_macro_regime()
+    
+    ndx, msg = get_nasdaq_100_tickers()
+    hot_tickers, hot_desc = get_ai_dynamic_sectors()
+    
+    combined_hot_sectors_list = list(set(hot_tickers + CORE_WATCHLIST))
+    # 將紅綠燈訊號傳遞給掃描引擎
+    target_df = scan_market_opportunities(ndx, MY_PORTFOLIO, combined_hot_sectors_list, macro_signal)
+    
+    if not target_df.empty:
+        html_table = target_df.to_html(index=False, escape=False)
+        
+        html_style = """
+        <style>
+            body { font-family: 'Segoe UI', Arial, sans-serif; color: #2c3e50; }
+            .status-box { background-color: #ecf0f1; border-left: 4px solid #2c3e50; padding: 15px; margin-bottom: 20px; font-size: 14px; line-height: 1.6; border-radius: 4px; }
+            table { border-collapse: collapse; width: 100%; font-size: 12px; table-layout: fixed; }
+            th { background-color: #2c3e50; color: white; padding: 10px 5px; text-align: center; }
+            td { border: 1px solid #bdc3c7; padding: 8px 5px; text-align: center; word-wrap: break-word; vertical-align: middle; }
+            tr:nth-child(even) { background-color: #f8f9fa; }
+            th:nth-last-child(2), th:last-child { width: 15%; }
+            th:last-child { background-color: #d35400; }
+            td:nth-last-child(3), td:nth-last-child(2), td:last-child { text-align: left; font-size: 11px; line-height: 1.4; }
+        </style>
+        """
+        
+        status_html = f"""
+        <div class='status-box'>
+            <h3 style="margin-top:0; color:#2c3e50;">📊 狙擊手儀表板：宏觀環境紅綠燈</h3>
+            {macro_desc}
+            <hr style="border-top: 1px dashed #bdc3c7; margin: 10px 0;">
+            💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>
+            🎯 核心必掃雷達：啟動 (光通信/半導體/太空)<br>
+            🔥 AI 動態板塊：<b>{hot_desc}</b>
+        </div>
+        """
+        
+        sop_reminder_html = """
+        <div style="background-color: #fdfbf7; border: 1px solid #e8e0d5; padding: 15px; margin-top: 25px; border-radius: 5px;">
+            <h3 style="color: #d35400; margin-top: 0;">🛡️ 宏觀防禦與 SOP 實戰鐵律</h3>
+            <ul style="font-size: 13px; color: #444; line-height: 1.6;">
+                <li><b>🔴 大盤紅燈 (VIX>25 或 QQQ RSI<30)：</b>無條件沒收所有做多買點，嚴禁抄底接刀。</li>
+                <li><b>🟡 大盤黃燈 (QQQ RSI>75 極度貪婪)：</b>取消動能突破追高策略，僅限收租或部位減碼。</li>
+                <li><b>🟢 大盤綠燈 (情緒穩定)：</b>允許全功率執行 🥇情境A(強勢回檔) 與 🥈情境B(動能突破)。</li>
+                <li><b>🛑 絕對避開：</b>出現「趨勢破壞 (個股RSI<40)」、AI 判定風險、財報 5 天內，無條件空手觀望。</li>
+            </ul>
+        </div>
+        """
+        
+        html_table = html_table.replace('🥇', '<span style="color:#d35400; font-weight:bold;">🥇</span>')
+        html_table = html_table.replace('🥈', '<span style="color:#2980b9; font-weight:bold;">🥈</span>')
+        html_table = html_table.replace('🥉', '<span style="color:#8e44ad; font-weight:bold;">🥉</span>')
+        html_table = html_table.replace('🛑', '<span style="color:#c0392b; font-weight:bold;">🛑</span>')
+        html_table = html_table.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
+
+        body = f"{html_style}{status_html}<h2>🎯 發現 {len(target_df)} 檔異動標的：</h2>{html_table}{sop_reminder_html}"
+        
+        to_email = os.environ.get("MAIL_TO")
+        from_email = os.environ.get("MAIL_USER")
+        app_pass = os.environ.get("MAIL_PASS")
+        
+        if to_email and from_email and app_pass:
+            send_scan_report_mail(f"🚦 量化早報 ({datetime.today().strftime('%m/%d')}) - {macro_signal}", body, to_email, from_email, app_pass)
+        else:
+            print("❌ 找不到寄件人信箱設定，請檢查環境變數！")
