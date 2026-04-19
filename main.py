@@ -31,7 +31,7 @@ if GEMINI_API_KEY:
 
 DAILY_QUOTA_EXHAUSTED = False
 
-MY_PORTFOLIO = ['NVDA', 'TSM', 'CRWV', 'PLTR', 'MSTR'] 
+MY_PORTFOLIO = ['NVDA', 'TSM', 'CRWV', 'PLTR', 'MSTR','MU'] 
 
 CORE_WATCHLIST = [
     'COHR', 'LITE', 'FN', 'NTAP',       
