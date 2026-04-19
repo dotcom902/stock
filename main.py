@@ -22,7 +22,7 @@ def get_safe_url(b64_str):
     return base64.b64decode(b64_str).decode('utf-8')
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-# ✅ 確認使用最新 2.5 Flash 混合推理模型
+# ✅ 使用最新 2.5 Flash 混合推理模型
 AI_MODEL_NAME = 'gemini-2.5-flash'  
 
 ai_client = None
@@ -139,7 +139,7 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
     prompt = f"""你是華爾街交易員。{ticker} 觸發 {signal_type}，RVOL {rvol}。新聞：{news_text}
     量化法則：
     1. 超跌/強勢回檔：大盤錯殺則【可以建倉】。
-    2. 動能突破：實質利多則【可以建倉】。
+    2. 動能突破/軋空：實質利多則【可以建倉】或【持有】。
     3. 極端超買/高檔震盪：提示風險，結論為【鎖定利潤】或【觀望收租】。
     4. 結構/趨勢破壞：一律【高風險避開】。
     格式：50字內理由。結論：【上述四者擇一】。"""
@@ -153,7 +153,6 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
             return response.text.replace('\n', '<br>')
         except Exception as e:
             error_msg = str(e).lower()
-            # ⚡ 涵蓋 429(限流) 與 503(伺服器忙線) 的完整防護網
             if "429" in error_msg or "quota" in error_msg or "503" in error_msg:
                 print(f"⏳ {ticker} 觸發 AI 伺服器忙線 (429/503)，等待 {backoff_time} 秒... (嘗試 {attempt+1}/{max_retries})")
                 time.sleep(backoff_time)
@@ -294,7 +293,7 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_
     return {'綜合建議': '⚪ 僅限正股操作', '期權履約價': '-', '當前 IV': '-'}
 
 # ==========================================
-# 🎯 狙擊手核心掃描與全天候 SOP (導入 IV 與紅綠燈)
+# 🎯 狙擊手核心掃描與全天候 SOP (導入 IV、紅綠燈、RSI鈍化修復)
 # ==========================================
 def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, macro_signal):
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
@@ -315,6 +314,9 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             latest_price = float(prices.iloc[-1])
             bias_20 = ((latest_price - float(prices.rolling(20).mean().iloc[-1])) / float(prices.rolling(20).mean().iloc[-1])) * 100
             
+            # ✨ 新增 5 日均線作為「鈍化濾網」
+            ma5 = float(prices.rolling(5).mean().iloc[-1])
+            
             volumes = df_volumes[ticker].dropna()
             rvol, vol_surge = 0.0, False
             if len(volumes) >= 20:
@@ -327,7 +329,12 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             signal_type = None
             
             if is_hot:
-                if latest_rsi >= 75 and bias_20 >= 10: signal_type = "極端超買"
+                # ✨ RSI 鈍化與破線邏輯升級
+                if latest_rsi >= 75:
+                    if latest_price > ma5:
+                        signal_type = "高檔鈍化(軋空)"  # RSI 極高但死守 5 日線，強勢主升段
+                    else:
+                        signal_type = "極端超買(破線)"  # RSI 極高且跌破 5 日線，動能竭盡
                 elif latest_rsi > 65 and bias_20 > 5 and vol_surge: signal_type = "動能突破"
                 elif 55 <= latest_rsi <= 65 and abs(bias_20) <= 5 and not vol_surge: signal_type = "高檔震盪"
                 elif 40 <= latest_rsi < 55 and bias_20 > -3: signal_type = "強勢回檔"
@@ -348,7 +355,7 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
 
                 identity = '💼 我的持倉' if is_portfolio else ('🔥 動態熱門板塊' if is_hot else '🔍 掃描發現')
                 
-                weight_multiplier = 20 if signal_type in ["強勢回檔", "動能突破", "極端超買"] else 10
+                weight_multiplier = 20 if signal_type in ["強勢回檔", "動能突破", "高檔鈍化(軋空)"] else 10
                 sort_weight = (1000 if is_portfolio else 0) + f_score + (rvol * weight_multiplier)
                 
                 raw_candidates.append({
@@ -366,9 +373,10 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
 
     raw_candidates.sort(key=lambda x: x['sort_weight'], reverse=True)
     
+    # 過濾掉不需要 AI 深入分析的標的
     ai_target_candidates = [
         item for item in raw_candidates 
-        if item['data']['型態'] not in ["持倉監控", "高檔震盪", "趨勢破壞", "極端超買"]
+        if item['data']['型態'] not in ["持倉監控", "高檔震盪", "趨勢破壞", "極端超買(破線)"]
     ][:5]
     
     print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，啟動 AI 狙擊分析...")
@@ -388,10 +396,13 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             sop = "🛑 財報將近：禁止 Sell Put 避免跳空。"
         elif "趨勢破壞" in stock['型態']: 
             sop = "🛑 趨勢破壞：熱門股轉弱，無條件避開或停損。"
+        # ✨ 新增鈍化與破線的 SOP 判斷
+        elif "高檔鈍化" in stock['型態']: 
+            sop = "🔥 情境D (主升段軋空)：RSI已鈍化。絕對禁止做空！持有正股並以 5 日均線作移動停損。"
         elif "極端超買" in stock['型態']: 
-            sop = "⚠️ 情境D (乖離過大)：鎖定利潤，或建倉 Bear Call Spread。"
+            sop = "⚠️ 情境E (超買且破線)：高檔跌破 5 日線，動能竭盡。鎖定利潤，或建倉 Bear Call Spread。"
         elif "高檔震盪" in stock['型態']: 
-            sop = "⏳ 情境E (橫盤收斂)：持有正股可賣 Covered Call 收租。"
+            sop = "⏳ 情境F (橫盤收斂)：持有正股可賣 Covered Call 收租。"
         elif "強勢回檔" in stock['型態']: 
             sop = "🥇 情境A (熱門回檔)：建倉 Bull Put Spread。"
         elif "動能突破" in stock['型態'] or "板塊異動" in stock['型態']: 
@@ -413,9 +424,9 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
         # ⚡ 隱含波動率 (IV) 策略強制寫入 SOP
         iv_status_str = stock.get('當前 IV', '')
         if "🔥" in iv_status_str:
-            if "情境A" in sop or "情境C" in sop or "情境E" in sop or "持倉監控" in sop:
+            if "情境A" in sop or "情境C" in sop or "情境F" in sop or "持倉監控" in sop:
                  sop += "<br><span style='color:#c0392b;'><b>(🔥 IV 高：權金極肥，強烈建議做賣方 Sell Put / Covered Call)</b></span>"
-            elif "情境B" in sop:
+            elif "情境B" in sop or "情境D" in sop:
                  sop += "<br><span style='color:#c0392b;'><b>(🔥 IV 高：嚴防 IV Crush，禁止單買 Call，改買正股或做價差)</b></span>"
         elif "🧊" in iv_status_str:
             if "情境B" in sop or "情境A" in sop:
@@ -482,11 +493,13 @@ if __name__ == "__main__":
         
         sop_reminder_html = """
         <div style="background-color: #fdfbf7; border: 1px solid #e8e0d5; padding: 15px; margin-top: 25px; border-radius: 5px;">
-            <h3 style="color: #d35400; margin-top: 0;">🛡️ 宏觀防禦與 SOP 實戰鐵律</h3>
+            <h3 style="color: #d35400; margin-top: 0;">🛡️ 宏觀防禦與 SOP 實戰鐵律 (含 RSI 鈍化防護)</h3>
             <ul style="font-size: 13px; color: #444; line-height: 1.6;">
                 <li><b>🔴 大盤紅燈 (VIX>25 或 QQQ RSI<30)：</b>無條件沒收所有做多買點，嚴禁抄底接刀。</li>
                 <li><b>🟡 大盤黃燈 (QQQ RSI>75 極度貪婪)：</b>取消動能突破追高策略，僅限收租或部位減碼。</li>
                 <li><b>🟢 大盤綠燈 (情緒穩定)：</b>允許全功率執行 🥇情境A(強勢回檔) 與 🥈情境B(動能突破)。</li>
+                <li><b>🔥 情境 D (主升段軋空)：</b>RSI > 75 且股價穩站 5 日線上，代表極強勢。絕對禁止做空，沿 5 日線移動停損。</li>
+                <li><b>⚠️ 情境 E (超買且破線)：</b>高檔跌破 5 日線，動能竭盡。立即鎖定利潤或建倉 Bear Call Spread。</li>
                 <li><b>🔥 IV 偏高策略：</b>權利金極度昂貴，絕對禁止單買期權 (Long Call/Put)，強烈建議當賣方 (Sell Put) 收租。</li>
                 <li><b>🛑 絕對避開：</b>出現「趨勢破壞 (個股RSI<40)」、AI 判定風險、財報 5 天內，無條件空手觀望。</li>
             </ul>
@@ -496,6 +509,7 @@ if __name__ == "__main__":
         html_table = html_table.replace('🥇', '<span style="color:#d35400; font-weight:bold;">🥇</span>')
         html_table = html_table.replace('🥈', '<span style="color:#2980b9; font-weight:bold;">🥈</span>')
         html_table = html_table.replace('🥉', '<span style="color:#8e44ad; font-weight:bold;">🥉</span>')
+        html_table = html_table.replace('🔥', '<span style="color:#c0392b; font-weight:bold;">🔥</span>')
         html_table = html_table.replace('🛑', '<span style="color:#c0392b; font-weight:bold;">🛑</span>')
         html_table = html_table.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
 
@@ -505,7 +519,6 @@ if __name__ == "__main__":
         from_email = os.environ.get("MAIL_USER")
         app_pass = os.environ.get("MAIL_PASS")
         
-        # ✅ 確認郵件標題正確結合日期與紅綠燈狀態
         if to_email and from_email and app_pass:
             send_scan_report_mail(f"🚦 量化早報 ({datetime.today().strftime('%m/%d')}) - {macro_signal}", body, to_email, from_email, app_pass)
         else:
