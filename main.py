@@ -44,32 +44,65 @@ REQ_SESSION.headers.update({
 })
 
 # ==========================================
-# 📈 大盤環境風向標 (修正 yfinance 抓取穩定度)
+# 🚦 宏觀紅綠燈大盤防禦機制 (VIX + QQQ RSI)
 # ==========================================
-def get_market_trend():
+def get_macro_regime():
+    """
+    結合 VIX 恐慌指數與 QQQ RSI 判定市場風險偏好狀態
+    """
     try:
-        status = []
-        is_bearish = False
-        for ticker in ['SPY', 'QQQ']:
-            df = yf.download(ticker, period="2mo", progress=False)
-            if df.empty or 'Close' not in df: continue
+        print("🌍 正在掃描總體經濟宏觀指標 (QQQ & VIX)...")
+        # 同時抓取 QQQ 與 VIX
+        df_data = yf.download(['QQQ', '^VIX'], period="3mo", progress=False)
+        
+        if df_data.empty or 'Close' not in df_data:
+            return "大盤狀態: 未知", "UNKNOWN"
             
-            # 處理 yfinance 可能返回的 Series 或 DataFrame 格式
-            prices = df['Close'][ticker].dropna() if isinstance(df['Close'], pd.DataFrame) else df['Close'].dropna()
+        df_closes = df_data['Close']
+        
+        # 1. 計算 QQQ 14日 RSI
+        qqq_prices = df_closes['QQQ'].dropna()
+        if len(qqq_prices) < 20: return "大盤狀態: 數據不足", "UNKNOWN"
+        
+        delta = qqq_prices.diff()
+        gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+        loss = -delta.clip(upper=0).ewm(alpha=1/14, adjust=False).mean()
+        qqq_rsi = (100 - (100 / (1 + gain / loss))).fillna(100)
+        latest_qqq_rsi = float(qqq_rsi.iloc[-1])
+        
+        # 2. 獲取最新 VIX 指數
+        vix_prices = df_closes['^VIX'].dropna()
+        latest_vix = float(vix_prices.iloc[-1])
+        
+        # 3. 紅綠燈邏輯判定
+        signal = "UNKNOWN"
+        if latest_vix > 25 or latest_qqq_rsi < 30:
+            status_icon = "🔴"
+            status_text = "紅燈 (Risk-Off / 恐慌蔓延)"
+            signal = "RED"
+        elif latest_vix < 20 and latest_qqq_rsi > 75:
+            status_icon = "🟡"
+            status_text = "黃燈 (極端貪婪 / 防範回調)"
+            signal = "YELLOW"
+        elif latest_vix < 20 and 40 <= latest_qqq_rsi <= 75:
+            status_icon = "🟢"
+            status_text = "綠燈 (Risk-On / 情緒穩定)"
+            signal = "GREEN"
+        else:
+            status_icon = "🟠"
+            status_text = "橘燈 (震盪過渡期)"
+            signal = "ORANGE"
             
-            if len(prices) < 20: continue
-            current = float(prices.iloc[-1])
-            ma20 = float(prices.rolling(20).mean().iloc[-1])
-            
-            if current < ma20:
-                status.append(f"{ticker}: 🔴破月線")
-                is_bearish = True
-            else:
-                status.append(f"{ticker}: 🟢多頭")
-        return " | ".join(status) if status else "大盤狀態: 未知", is_bearish
+        desc = f"<span style='font-size:16px;'>{status_icon}</span> <b>{status_text}</b> <br>▪️ VIX 恐慌指數: <b>{latest_vix:.2f}</b> <br>▪️ QQQ 日線 RSI: <b>{latest_qqq_rsi:.2f}</b>"
+        return desc, signal
+        
     except Exception as e:
-        return "大盤狀態: 未知", False
+        print(f"⚠️ 宏觀指標抓取失敗: {e}")
+        return "大盤狀態: 未知", "UNKNOWN"
 
+# ==========================================
+# 🧠 AI 熱門板塊動態偵測
+# ==========================================
 def get_ai_dynamic_sectors(max_retries=2):
     global DAILY_QUOTA_EXHAUSTED
     fallback_tickers = ['MARA', 'IREN', 'SYM', 'PATH', 'CRWD']
@@ -95,6 +128,9 @@ def get_ai_dynamic_sectors(max_retries=2):
             else: return fallback_tickers, fallback_desc
     return fallback_tickers, fallback_desc
 
+# ==========================================
+# 🤖 AI 個股投研分析
+# ==========================================
 def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=2):
     global DAILY_QUOTA_EXHAUSTED
     if DAILY_QUOTA_EXHAUSTED or not ai_client: return "⚠️ AI 暫停分析"
@@ -216,9 +252,9 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_
     except: return {'綜合建議': '⚪ 僅限正股操作', '期權履約價': '-', '年化報酬': '-'}
 
 # ==========================================
-# 🎯 狙擊手核心掃描與全天候 SOP
+# 🎯 狙擊手核心掃描與全天候 SOP (導入紅綠燈)
 # ==========================================
-def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, is_market_bearish):
+def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, macro_signal):
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
     df_data = yf.download(all_tickers, period="3mo", progress=False) 
     df_closes, df_volumes = df_data['Close'], df_data['Volume']
@@ -286,24 +322,22 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, is
 
     raw_candidates.sort(key=lambda x: x['sort_weight'], reverse=True)
     
-    # ✨ 終極修復：分離 AI 算力額度
-    # 只把「真正觸發進出場訊號」的標的送給 AI，過濾掉單純的「持倉監控」與不需要 AI 的盤整
     ai_target_candidates = [
         item for item in raw_candidates 
         if item['data']['型態'] not in ["持倉監控", "高檔震盪", "趨勢破壞", "極端超買"]
     ][:5]
     
-    print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，僅針對最頂尖 {len(ai_target_candidates)} 檔觸發訊號標的啟動 AI 分析...")
+    print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，啟動 AI 狙擊分析...")
     
     results = []
     for item in raw_candidates:
         stock = item['data']
         if item in ai_target_candidates:
-            print(f"➤ 啟動 AI 狙擊分析: {stock['代碼']} ({stock['型態']})")
             stock['🤖 AI 投研觀點'] = analyze_stock_with_ai(stock['代碼'], stock['型態'], stock['熱度(RVOL)'], item['raw_news'])
         else:
             stock['🤖 AI 投研觀點'] = "⏸️ 系統已記錄 / 無需 AI 介入"
         
+        # 基礎 SOP 判定
         sop = "⚪ 觀望或依原定策略"
         if "高風險" in stock['🤖 AI 投研觀點'] or "⚠️" in stock['🤖 AI 投研觀點']: 
             sop = "🛑 AI 否決：風險過高，直接放棄。"
@@ -322,89 +356,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, is
         elif "超跌反彈" in stock['型態']: 
             sop = "🥉 情境C (優質錯殺)：保守 Sell Put 收租。"
             
-        # ✨ 大盤防禦機制介入
-        if is_market_bearish:
-            if "情境A" in sop or "情境B" in sop or "情境C" in sop:
-                sop = sop.replace("🥇", "🛡️").replace("🥈", "🛡️").replace("🥉", "🛡️") + "<br><b>(🚨大盤轉弱，建倉必須減半)</b>"
-            
-        stock['🎯 SOP 操作提示'] = sop
-        results.append(stock)
-    return pd.DataFrame(results)
-
-def send_scan_report_mail(subject, body, to_emails_str, from_email, app_password):
-    recipient_list = [e.strip() for e in to_emails_str.split(',') if e.strip()]
-    
-    msg = MIMEMultipart()
-    msg['From'] = from_email
-    msg['To'] = to_emails_str
-    msg['Subject'] = subject
-    msg.attach(MIMEText(f"<html><body>{body}</body></html>", 'html'))
-    
-    try:
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
-            server.login(from_email, app_password)
-            server.sendmail(from_email, recipient_list, msg.as_string())
-        print(f"📧 報告已成功寄送至 {len(recipient_list)} 位收件人!")
-    except Exception as e: 
-        print(f"❌ 寄信失敗: {e}")
-
-if __name__ == "__main__":
-    ndx, msg = get_nasdaq_100_tickers()
-    hot_tickers, hot_desc = get_ai_dynamic_sectors()
-    market_status, is_bearish = get_market_trend() 
-    
-    combined_hot_sectors_list = list(set(hot_tickers + CORE_WATCHLIST))
-    target_df = scan_market_opportunities(ndx, MY_PORTFOLIO, combined_hot_sectors_list, is_bearish)
-    
-    if not target_df.empty:
-        html_table = target_df.to_html(index=False, escape=False)
-        
-        html_style = """
-        <style>
-            body { font-family: 'Segoe UI', Arial, sans-serif; color: #2c3e50; }
-            .status-box { background-color: #ecf0f1; border-left: 4px solid #3498db; padding: 12px 15px; margin-bottom: 20px; font-size: 13px; line-height: 1.5; }
-            table { border-collapse: collapse; width: 100%; font-size: 12px; table-layout: fixed; }
-            th { background-color: #2c3e50; color: white; padding: 10px 5px; text-align: center; }
-            td { border: 1px solid #bdc3c7; padding: 8px 5px; text-align: center; word-wrap: break-word; vertical-align: middle; }
-            tr:nth-child(even) { background-color: #f8f9fa; }
-            th:nth-last-child(2), th:last-child { width: 15%; }
-            th:last-child { background-color: #d35400; }
-            td:nth-last-child(3), td:nth-last-child(2), td:last-child { text-align: left; font-size: 11px; line-height: 1.4; }
-        </style>
-        """
-        
-        status_html = f"<div class='status-box'><b>📊 大盤狀態：{market_status}</b><br>{msg}<br>💼 持倉監控：{len(MY_PORTFOLIO)} 檔 <br>🎯 核心必掃雷達：啟動 (光通信/半導體/太空)<br>🔥 AI 動態板塊：<b>{hot_desc}</b></div>"
-        
-        sop_reminder_html = """
-        <div style="background-color: #fdfbf7; border: 1px solid #e8e0d5; padding: 15px; margin-top: 25px; border-radius: 5px;">
-            <h3 style="color: #d35400; margin-top: 0;">🛡️ 熱門股全天候 SOP 實戰鐵律</h3>
-            <ul style="font-size: 13px; color: #444; line-height: 1.6;">
-                <li><b>📊 大盤防禦機制：</b>若 SPY/QQQ 跌破月線，系統會自動亮起 🛡️，強烈建議多頭部位減半。</li>
-                <li><b>🎯 Upside (潛在空間)：</b>投行目標價距離現價的空間。若呈負數代表溢價嚴重，絕對禁止追高。</li>
-                <li><b>🥇 情境 A (強勢回檔)：</b>採用 <b>Bull Put Spread</b> 鎖定下檔風險，勝率最高。</li>
-                <li><b>🥈 情境 B (動能突破)：</b>追擊正股/買 Call，<b>絕對設定 8% 移動停損</b>，嚴防假突破。</li>
-                <li><b>⚠️ 情境 D (極端超買)：</b>乖離過大絕對不追！考慮獲利了結或建倉 <b>Bear Call Spread</b>。</li>
-                <li><b>🛑 絕對避開：</b>出現「趨勢破壞 (RSI<40)」、AI 判定風險、財報 5 天內，無條件空手觀望。</li>
-            </ul>
-        </div>
-        """
-        
-        html_table = html_table.replace('🥇', '<span style="color:#d35400; font-weight:bold;">🥇</span>')
-        html_table = html_table.replace('🥈', '<span style="color:#2980b9; font-weight:bold;">🥈</span>')
-        html_table = html_table.replace('🥉', '<span style="color:#8e44ad; font-weight:bold;">🥉</span>')
-        html_table = html_table.replace('🛡️', '<span style="color:#34495e; font-weight:bold;">🛡️</span>')
-        html_table = html_table.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
-        html_table = html_table.replace('⏳', '<span style="color:#7f8c8d; font-weight:bold;">⏳</span>')
-        html_table = html_table.replace('🛑', '<span style="color:#c0392b; font-weight:bold;">🛑</span>')
-
-        body = f"{html_style}{status_html}<h2>🎯 發現 {len(target_df)} 檔異動標的：</h2>{html_table}{sop_reminder_html}"
-        
-        to_email = os.environ.get("MAIL_TO")
-        from_email = os.environ.get("MAIL_USER")
-        app_pass = os.environ.get("MAIL_PASS")
-        
-        if to_email and from_email and app_pass:
-            send_scan_report_mail(f"🧠 量化早報 ({datetime.today().strftime('%Y-%m-%d')})", body, to_email, from_email, app_pass)
-        else:
-            print("❌ 找不到寄件人信箱、密碼或收件人(MAIL_TO)設定，請檢查 GitHub Secrets！")
+        # 🚦 大盤紅綠燈強制覆寫 (Override Mechanism)
+        if macro_signal == "RED":
+            if "情境A" in sop or "情境B" in sop or "情境C" in
