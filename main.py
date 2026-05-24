@@ -98,12 +98,11 @@ def get_macro_regime():
         return "大盤狀態: 未知", "UNKNOWN"
 
 # ==========================================
-# 📊 新增：AI 美股收盤總結與資金流向分析
+# 📊 AI 美股收盤總結與資金流向分析
 # ==========================================
 def get_market_closing_summary(hot_sectors_desc):
     try:
         print("📰 正在生成美股收盤總結與資金流向報告...")
-        # 抓取四大指數
         indices = {'S&P 500': '^GSPC', 'Nasdaq 100': '^NDX', 'Dow Jones': '^DJI', 'Russell 2000 (中小盤)': 'IWM'}
         df_indices = yf.download(list(indices.values()), period="5d", progress=False)['Close']
         
@@ -131,7 +130,7 @@ def get_market_closing_summary(hot_sectors_desc):
         
         請寫一段約 100-150 字的「美股收盤總結與資金流向」速報，供交易員晨會閱讀。
         要求：
-        1. 語氣專業、冷靜犀利，直接點評大盤強弱結構（例如：科技股領漲還是中小盤補漲？）。
+        1. 語氣專業、冷靜犀利，直接點評大盤強弱結構。
         2. 結合大盤表現與熱門板塊，精準指出「資金正在從哪裡撤出、往哪裡集中（Risk-on 還是 Risk-off）」。
         3. 直接輸出純文本，請使用 <b> 加粗關鍵字，段落要清晰，不要使用 ``` 標記包裝。
         """
@@ -200,20 +199,23 @@ def get_ai_dynamic_sectors(max_retries=3):
     return fallback_tickers, fallback_desc
 
 # ==========================================
-# 🤖 AI 個股投研分析 
+# 🤖 AI 個股投研分析 (✨ 升級：注入板塊上下文)
 # ==========================================
-def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=4):
+def analyze_stock_with_ai(ticker, sector_name, signal_type, rvol, news_list_raw, max_retries=4):
     global DAILY_QUOTA_EXHAUSTED
     if DAILY_QUOTA_EXHAUSTED or not ai_client: return "⚠️ AI 暫停分析"
     
     news_text = "\n".join([f"- {item.get('title', '')}" for item in news_list_raw[:5]])
-    prompt = f"""你是華爾街交易員。{ticker} 觸發 {signal_type}，RVOL {rvol}。新聞：{news_text}
+    # ✨ 讓 AI 知道該股票所屬板塊，分析邏輯會更精準
+    prompt = f"""你是華爾街交易員。{ticker} (所屬板塊: {sector_name}) 觸發了 {signal_type}，量能為 {rvol}。
+    最新新聞：{news_text}
+    
     量化法則：
     1. 超跌/強勢回檔：大盤錯殺則【可以建倉】。
     2. 動能突破/軋空：實質利多則【可以建倉】或【持有】。
     3. 極端超買/高檔震盪：提示風險，結論為【鎖定利潤】或【觀望收租】。
     4. 結構/趨勢破壞：一律【高風險避開】。
-    格式：50字內理由。結論：【上述四者擇一】。"""
+    請結合該公司的「所屬板塊屬性」與「技術型態」給出 50 字內理由。結論：【上述四者擇一】。"""
     
     backoff_time = 5  
     for attempt in range(max_retries):
@@ -255,6 +257,7 @@ def get_nasdaq_100_tickers():
             if 'Ticker' in table.columns: return table['Ticker'].tolist(), "✅ Nasdaq 100 成功"
     except: return ['AAPL', 'MSFT'], "⚠️ 抓取失敗"
 
+# ✨ 升級：精準抓取公司所屬行業 (Industry)
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     score = 50
     latest_news_str = "無最新新聞" 
@@ -267,9 +270,10 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
         info = ticker_obj.info
         if not info: raise ValueError("無法獲取 info")
 
-        sector = info.get('sector', '未知板塊')
-        industry = info.get('industry', '')
-        if industry: sector = f"{sector} ({industry})"
+        # 優先獲取更細分的 Industry，若無則降級獲取 Sector
+        fetched_industry = info.get('industry', '')
+        fetched_sector = info.get('sector', '')
+        sector = fetched_industry if fetched_industry else (fetched_sector if fetched_sector else "未知板塊")
 
         earn_ts = info.get('earningsTimestamp')
         if earn_ts:
@@ -382,14 +386,12 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             
             volumes = df_volumes[ticker].dropna()
             rvol, vol_surge = 0.0, False
-            rvol_display = "-"
             
             if len(volumes) >= 20:
                 vol_ma20 = float(volumes.rolling(20).mean().iloc[-1])
                 if pd.notna(vol_ma20) and vol_ma20 > 0:
                     rvol = round(float(volumes.iloc[-1]) / vol_ma20, 2)
                     vol_surge = rvol > 1.2 
-                    rvol_display = f"<span style='color:#c0392b; font-weight:bold;'>{rvol}x (爆量)</span>" if rvol > 1.5 else f"{rvol}x"
             
             is_portfolio, is_hot = ticker in portfolio_list, ticker in hot_sectors_list
             signal_type = None
@@ -417,18 +419,33 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
                 strat = get_investment_strategy(stock_obj, latest_price, f_score, signal_type, d_earn)
                 
                 if signal_type == "持倉監控": strat['綜合建議'] = "🔹 日常追蹤" if f_score >= 50 else "⚠️ 留意停損"
-
-                identity = '💼 我的持倉' if is_portfolio else ('🔥 動態熱門板塊' if is_hot else '🔍 掃描發現')
                 
                 weight_multiplier = 20 if signal_type in ["強勢回檔", "動能突破", "高檔鈍化(軋空)"] else 10
                 sort_weight = (1000 if is_portfolio else 0) + f_score + (rvol * weight_multiplier)
                 
+                # ✨ 升級：動態熱度與板塊視覺化標籤
+                sector_short = sector[:14] + ".." if len(sector) > 14 else sector
+                if is_hot and rvol > 1.5:
+                    hot_label = "<span style='color:#c0392b; font-weight:bold;'>🔥 極熱 (資金湧入)</span>"
+                elif is_hot:
+                    hot_label = "<span style='color:#e67e22; font-weight:bold;'>🔥 熱門板塊</span>"
+                elif is_portfolio:
+                    hot_label = "<span style='color:#2980b9; font-weight:bold;'>💼 我的持倉</span>"
+                else:
+                    hot_label = "<span style='color:#7f8c8d;'>🔍 異動掃描</span>"
+                    
+                rvol_str = f"RVOL: {rvol}x"
+                if rvol > 1.5:
+                    rvol_str = f"<span style='color:#c0392b; font-weight:bold;'>{rvol_str} (爆量)</span>"
+                
                 raw_candidates.append({
-                    'sort_weight': sort_weight, 'raw_news': raw_news,
+                    'sort_weight': sort_weight, 'raw_news': raw_news, 'sector_raw': sector,
                     'data': {
-                        '身份': identity, '代碼': ticker, '型態': signal_type, '現價': round(latest_price, 2),
+                        '代碼': f"<b>{ticker}</b>", 
+                        '板塊與熱度': f"<b>{sector_short}</b><br>{hot_label}<br>{rvol_str}",
+                        '型態': signal_type, '現價': round(latest_price, 2),
                         'Upside': upside_val, 
-                        'RSI': round(latest_rsi, 2), '熱度(RVOL)': rvol_display, '財報日': d_earn, 
+                        'RSI': round(latest_rsi, 2), '財報日': d_earn, 
                         '當前 IV': strat['當前 IV'],
                         '評分': int(f_score),
                         '綜合建議': strat['綜合建議'], '期權履約價': strat['期權履約價'], '最新新聞': l_news
@@ -440,7 +457,7 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
     
     ai_target_candidates = [
         item for item in raw_candidates 
-        if item['data']['身份'] == '💼 我的持倉' or item['data']['型態'] not in ["高檔震盪", "趨勢破壞", "極端超買(破線)"]
+        if item['data']['型態'] not in ["持倉監控", "高檔震盪", "趨勢破壞", "極端超買(破線)"]
     ][:8]
     
     print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，啟動 AI 狙擊分析...")
@@ -449,7 +466,8 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
     for item in raw_candidates:
         stock = item['data']
         if item in ai_target_candidates:
-            stock['🤖 AI 投研觀點'] = analyze_stock_with_ai(stock['代碼'], stock['型態'], stock['熱度(RVOL)'], item['raw_news'])
+            # ✨ 升級：將板塊名稱 (sector_raw) 注入給 AI
+            stock['🤖 AI 投研觀點'] = analyze_stock_with_ai(stock['代碼'], item['sector_raw'], stock['型態'], stock['板塊與熱度'], item['raw_news'])
         else:
             stock['🤖 AI 投研觀點'] = "⏸️ 系統已記錄 / 無需 AI 介入"
         
@@ -521,7 +539,6 @@ if __name__ == "__main__":
     ndx, msg = get_nasdaq_100_tickers()
     hot_tickers, hot_desc = get_ai_dynamic_sectors()
     
-    # 🌟 觸發新增的「收盤總結與資金流向」分析模組
     market_summary_html = get_market_closing_summary(hot_desc)
     
     combined_hot_sectors_list = list(set(hot_tickers + CORE_WATCHLIST))
@@ -577,7 +594,6 @@ if __name__ == "__main__":
         html_table = html_table.replace('🛑', '<span style="color:#c0392b; font-weight:bold;">🛑</span>')
         html_table = html_table.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
 
-        # 🌟 將收盤總結 (market_summary_html) 插入到報告主體中
         body = f"{html_style}{status_html}{market_summary_html}<h2>🎯 發現 {len(target_df)} 檔異動標的：</h2>{html_table}{sop_reminder_html}"
         
         to_email = os.environ.get("MAIL_TO")
