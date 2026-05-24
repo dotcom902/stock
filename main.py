@@ -13,7 +13,7 @@ import time
 import json
 import base64  
 import requests  
-import re  # ✅ 新增正則表達式庫，用於軍規級 JSON 提取
+import re  
 from google import genai  
 from curl_cffi import requests as cffi_requests
 
@@ -23,7 +23,6 @@ def get_safe_url(b64_str):
     return base64.b64decode(b64_str).decode('utf-8')
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-# ✅ 使用最新 2.5 Flash 混合推理模型
 AI_MODEL_NAME = 'gemini-2.5-flash'  
 
 ai_client = None
@@ -67,10 +66,9 @@ def get_macro_regime():
         qqq_rsi = (100 - (100 / (1 + gain / loss))).fillna(100)
         latest_qqq_rsi = float(qqq_rsi.iloc[-1])
         
-        # 🛡️ 增強 VIX 抓取穩定度 (防止 Yahoo Finance 盤後短暫 NaN)
         vix_prices = df_closes['^VIX'].ffill().dropna()
         if len(vix_prices) == 0:
-            latest_vix = 20.0  # 默認中性值防止崩潰
+            latest_vix = 20.0  
         else:
             latest_vix = float(vix_prices.iloc[-1])
         
@@ -100,7 +98,65 @@ def get_macro_regime():
         return "大盤狀態: 未知", "UNKNOWN"
 
 # ==========================================
-# 🧠 AI 熱門板塊動態偵測 (⚡ 增強版：防幻覺、強迫細分、軍規級 JSON 解析)
+# 📊 新增：AI 美股收盤總結與資金流向分析
+# ==========================================
+def get_market_closing_summary(hot_sectors_desc):
+    try:
+        print("📰 正在生成美股收盤總結與資金流向報告...")
+        # 抓取四大指數
+        indices = {'S&P 500': '^GSPC', 'Nasdaq 100': '^NDX', 'Dow Jones': '^DJI', 'Russell 2000 (中小盤)': 'IWM'}
+        df_indices = yf.download(list(indices.values()), period="5d", progress=False)['Close']
+        
+        index_str = ""
+        for name, ticker in indices.items():
+            if ticker in df_indices:
+                closes = df_indices[ticker].dropna()
+                if len(closes) >= 2:
+                    today_c = float(closes.iloc[-1])
+                    yest_c = float(closes.iloc[-2])
+                    pct_change = ((today_c - yest_c) / yest_c) * 100
+                    icon = "🟢" if pct_change > 0 else "🔴"
+                    index_str += f"{name}: {today_c:.2f} ({icon} {pct_change:+.2f}%)\n"
+        
+        if not ai_client or DAILY_QUOTA_EXHAUSTED:
+            return f"<div style='padding:10px; background:#f0f0f0;'>{index_str.replace(chr(10), '<br>')}</div>"
+
+        today_str = datetime.today().strftime('%Y-%m-%d')
+        prompt = f"""
+        現在是 {today_str}（美股收盤後）。你是華爾街頂級避險基金的首席策略師。
+        以下是今日美股四大指數的收盤表現：
+        {index_str}
+        
+        今日我們的 AI 量化系統偵測到「資金異常湧入」的熱門板塊為：{hot_sectors_desc}
+        
+        請寫一段約 100-150 字的「美股收盤總結與資金流向」速報，供交易員晨會閱讀。
+        要求：
+        1. 語氣專業、冷靜犀利，直接點評大盤強弱結構（例如：科技股領漲還是中小盤補漲？）。
+        2. 結合大盤表現與熱門板塊，精準指出「資金正在從哪裡撤出、往哪裡集中（Risk-on 還是 Risk-off）」。
+        3. 直接輸出純文本，請使用 <b> 加粗關鍵字，段落要清晰，不要使用 ``` 標記包裝。
+        """
+        
+        response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
+        summary_text = response.text.replace('\n', '<br>')
+        
+        html_output = f"""
+        <div style="background-color: #e8f4f8; border-left: 5px solid #2980b9; padding: 15px; margin-bottom: 20px; border-radius: 5px;">
+            <h3 style="margin-top:0; color:#2c3e50;">📰 華爾街收盤總結 & 資金流向</h3>
+            <div style="font-family: monospace; font-size: 14px; margin-bottom: 12px; background: #fff; padding: 10px; border-radius: 4px; border: 1px solid #bdc3c7;">
+                {index_str.replace(chr(10), '<br>')}
+            </div>
+            <div style="font-size: 14px; color: #34495e; line-height: 1.6;">
+                {summary_text}
+            </div>
+        </div>
+        """
+        return html_output
+    except Exception as e:
+        print(f"⚠️ 大盤總結生成失敗: {e}")
+        return ""
+
+# ==========================================
+# 🧠 AI 熱門板塊動態偵測 (軍規級 JSON 解析)
 # ==========================================
 def get_ai_dynamic_sectors(max_retries=3):
     global DAILY_QUOTA_EXHAUSTED
@@ -115,12 +171,11 @@ def get_ai_dynamic_sectors(max_retries=3):
     請評估當前美股市場最新動態，選出「本週資金最集中、最具爆發力的 3 個『細分』產業板塊」。
     （注意：絕對不要只說"科技股"或"半導體"這種大範圍，請精確到例如："矽光子"、"液冷散熱"、"AI PC"、"鈾礦核能"、"固態電池"等細分賽道）。
 
-    【選股嚴格紀律 - 違反將導致系統崩潰】：
-    1. 為這 3 個板塊各挑選 3~4 檔最具代表性、流動性極佳（市值必須 > 20億美元）的美股代碼。
-    2. 絕對禁止包含已退市、被收購的股票（如 SNDK）、OTC 股票或任何槓桿 ETF。
-    3. 代碼必須是純大寫英文字母，且目前在 Yahoo Finance 上完全有效。
+    【選股嚴格紀律】：
+    1. 為這 3 個板塊各挑選 3~4 檔流動性極佳（市值必須 > 20億美元）的美股代碼。
+    2. 絕對禁止包含已退市的股票、OTC 股票或槓桿 ETF。
 
-    請務必「只」輸出乾淨的 JSON 格式，不要有任何 Markdown 標記 (```json) 或其他說明文字：
+    請只輸出 JSON 格式：
     {{"sector_names": "板塊A, 板塊B, 板塊C", "tickers": ["代碼1", "代碼2", "代碼3"]}}
     """
     
@@ -129,40 +184,23 @@ def get_ai_dynamic_sectors(max_retries=3):
         try:
             print(f"🧠 正在請 AI 偵測今日熱門板塊... (嘗試 {attempt+1}/{max_retries})")
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
-            
-            # 🛡️ 軍規級 JSON 清理：利用正則表達式強行提取 {} 中的內容，無視 AI 的多餘廢話
             raw_text = response.text
             json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
             
             if json_match:
-                clean_json_str = json_match.group(0)
-                data = json.loads(clean_json_str)
-                
-                # 🛡️ 代碼二次過濾：去除可能帶有特殊符號或空格的無效代碼
-                valid_tickers = [
-                    t.strip().upper() for t in data.get("tickers", fallback_tickers) 
-                    if t.strip().isalpha() and len(t.strip()) <= 5
-                ]
-                
+                data = json.loads(json_match.group(0))
+                valid_tickers = [t.strip().upper() for t in data.get("tickers", fallback_tickers) if t.strip().isalpha() and len(t.strip()) <= 5]
                 return valid_tickers, data.get("sector_names", fallback_desc)
-            else:
-                raise ValueError("AI 回應中找不到有效的 JSON 格式")
-                
         except Exception as e:
-            error_msg = str(e).lower()
-            if "429" in error_msg or "503" in error_msg or "quota" in error_msg:
-                print(f"⏳ AI 板塊掃描觸發伺服器擁塞 (429/503)，等待 {backoff_time} 秒...")
+            if "429" in str(e) or "503" in str(e):
                 time.sleep(backoff_time)
                 backoff_time *= 2
             else:
-                print(f"⚠️ 解析 AI 熱門板塊資料失敗: {e}")
-                # 發生非超時錯誤（例如 JSON 解析失敗）時，不重試直接回傳備用名單
                 return fallback_tickers, fallback_desc
-                
     return fallback_tickers, fallback_desc
 
 # ==========================================
-# 🤖 AI 個股投研分析 (⚡ 支援 503 重試)
+# 🤖 AI 個股投研分析 
 # ==========================================
 def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=4):
     global DAILY_QUOTA_EXHAUSTED
@@ -178,23 +216,19 @@ def analyze_stock_with_ai(ticker, signal_type, rvol, news_list_raw, max_retries=
     格式：50字內理由。結論：【上述四者擇一】。"""
     
     backoff_time = 5  
-    
     for attempt in range(max_retries):
         try:
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
             time.sleep(3) 
             return response.text.replace('\n', '<br>')
         except Exception as e:
-            error_msg = str(e).lower()
-            if "429" in error_msg or "quota" in error_msg or "503" in error_msg:
-                print(f"⏳ {ticker} 觸發 AI 伺服器忙線 (429/503)，等待 {backoff_time} 秒... (嘗試 {attempt+1}/{max_retries})")
+            if "429" in str(e).lower() or "503" in str(e).lower():
                 time.sleep(backoff_time)
                 backoff_time *= 2 
             else:
                 return f"⚠️ 伺服器異常或模型錯誤: {str(e)[:25]}"
-                
     DAILY_QUOTA_EXHAUSTED = True
-    return "⚠️ AI 伺服器持續擁塞 (已達重試上限)"
+    return "⚠️ AI 伺服器持續擁塞"
 
 def get_robust_news(ticker_obj, ticker_symbol):
     news_items = []
@@ -241,7 +275,6 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
         if earn_ts:
             earn_date = datetime.fromtimestamp(earn_ts)
             days = (earn_date.date() - datetime.today().date()).days
-            # 🛡️ 修復財報地雷預警：因為期權操作動輒 30 天以上，將警告天數從 5 天拉長至 30 天
             if days >= 0:
                 days_to_earnings = f"⚠️ {days}天後" if days <= 30 else f"{days}天後"
             else:
@@ -285,9 +318,6 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     except Exception as e:
         return 50, "數據異常", "未知", "未知", [], "-"
 
-# ==========================================
-# 🎯 提取期權策略與 IV 數據
-# ==========================================
 def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_to_earnings):
     try:
         exp_dates = ticker_obj.options
@@ -327,7 +357,7 @@ def get_investment_strategy(ticker_obj, current_price, score, signal_type, days_
     return {'綜合建議': '⚪ 僅限正股操作', '期權履約價': '-', '當前 IV': '-'}
 
 # ==========================================
-# 🎯 狙擊手核心掃描與全天候 SOP (導入 IV、紅綠燈、RSI鈍化修復)
+# 🎯 狙擊手核心掃描與全天候 SOP 
 # ==========================================
 def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, macro_signal):
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
@@ -348,7 +378,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             latest_price = float(prices.iloc[-1])
             bias_20 = ((latest_price - float(prices.rolling(20).mean().iloc[-1])) / float(prices.rolling(20).mean().iloc[-1])) * 100
             
-            # ✨ 新增 5 日均線作為「鈍化濾網」
             ma5 = float(prices.rolling(5).mean().iloc[-1])
             
             volumes = df_volumes[ticker].dropna()
@@ -360,7 +389,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
                 if pd.notna(vol_ma20) and vol_ma20 > 0:
                     rvol = round(float(volumes.iloc[-1]) / vol_ma20, 2)
                     vol_surge = rvol > 1.2 
-                    # 🛡️ 增強 RVOL (爆量) 視覺標記
                     rvol_display = f"<span style='color:#c0392b; font-weight:bold;'>{rvol}x (爆量)</span>" if rvol > 1.5 else f"{rvol}x"
             
             is_portfolio, is_hot = ticker in portfolio_list, ticker in hot_sectors_list
@@ -410,7 +438,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
 
     raw_candidates.sort(key=lambda x: x['sort_weight'], reverse=True)
     
-    # 🛡️ 解除 AI 封印：強制將「我的持倉」納入 AI 分析行列，上限調至 8 檔
     ai_target_candidates = [
         item for item in raw_candidates 
         if item['data']['身份'] == '💼 我的持倉' or item['data']['型態'] not in ["高檔震盪", "趨勢破壞", "極端超買(破線)"]
@@ -446,7 +473,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
         elif "超跌反彈" in stock['型態']: 
             sop = "🥉 情境C (優質錯殺)：保守 Sell Put 收租。"
             
-        # 🚦 大盤紅綠燈強制覆寫
         if macro_signal == "RED":
             if "情境A" in sop or "情境B" in sop or "情境C" in sop:
                 sop = "🛑 <b>[紅燈警戒]</b> 系統性風險/恐慌蔓延。禁止所有做多建倉！僅限觀望或買入 Put 避險。"
@@ -457,7 +483,6 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             if "情境A" in sop or "情境B" in sop:
                 sop = sop + " <br><span style='color:#27ae60;'><b>(🟢 綠燈加持：動能健康，允許佈局)</b></span>"
                 
-        # ⚡ 隱含波動率 (IV) 策略強制寫入 SOP
         iv_status_str = stock.get('當前 IV', '')
         if "🔥" in iv_status_str:
             if "情境A" in sop or "情境C" in sop or "情境F" in sop or "持倉監控" in sop:
@@ -495,6 +520,9 @@ if __name__ == "__main__":
     
     ndx, msg = get_nasdaq_100_tickers()
     hot_tickers, hot_desc = get_ai_dynamic_sectors()
+    
+    # 🌟 觸發新增的「收盤總結與資金流向」分析模組
+    market_summary_html = get_market_closing_summary(hot_desc)
     
     combined_hot_sectors_list = list(set(hot_tickers + CORE_WATCHLIST))
     target_df = scan_market_opportunities(ndx, MY_PORTFOLIO, combined_hot_sectors_list, macro_signal)
@@ -549,7 +577,8 @@ if __name__ == "__main__":
         html_table = html_table.replace('🛑', '<span style="color:#c0392b; font-weight:bold;">🛑</span>')
         html_table = html_table.replace('⚠️', '<span style="color:#e67e22; font-weight:bold;">⚠️</span>')
 
-        body = f"{html_style}{status_html}<h2>🎯 發現 {len(target_df)} 檔異動標的：</h2>{html_table}{sop_reminder_html}"
+        # 🌟 將收盤總結 (market_summary_html) 插入到報告主體中
+        body = f"{html_style}{status_html}{market_summary_html}<h2>🎯 發現 {len(target_df)} 檔異動標的：</h2>{html_table}{sop_reminder_html}"
         
         to_email = os.environ.get("MAIL_TO")
         from_email = os.environ.get("MAIL_USER")
