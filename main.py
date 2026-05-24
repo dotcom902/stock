@@ -13,6 +13,7 @@ import time
 import json
 import base64  
 import requests  
+import re  # ✅ 新增正則表達式庫，用於軍規級 JSON 提取
 from google import genai  
 from curl_cffi import requests as cffi_requests
 
@@ -99,7 +100,7 @@ def get_macro_regime():
         return "大盤狀態: 未知", "UNKNOWN"
 
 # ==========================================
-# 🧠 AI 熱門板塊動態偵測 (⚡ 支援 503 重試)
+# 🧠 AI 熱門板塊動態偵測 (⚡ 增強版：防幻覺、強迫細分、軍規級 JSON 解析)
 # ==========================================
 def get_ai_dynamic_sectors(max_retries=3):
     global DAILY_QUOTA_EXHAUSTED
@@ -110,18 +111,43 @@ def get_ai_dynamic_sectors(max_retries=3):
 
     today_str = datetime.today().strftime('%Y-%m-%d')
     prompt = f"""
-    現在是 {today_str}。你是一位華爾街頂尖的「板塊輪動與資金流向分析師」。
-    請評估當前美股市場的最新動態，選出「當前資金最集中、最具爆發力的 3 個產業板塊」。
-    然後，為這 3 個板塊各挑選 3~4 檔最具代表性、流動性佳的美股股票代碼（總共約 9~12 檔）。
-    請以 JSON 格式輸出：{{"sector_names": "名稱", "tickers": ["代碼1"]}}
+    現在時間是 {today_str}。你是一位華爾街頂尖的「板塊輪動與資金流向量化分析師」。
+    請評估當前美股市場最新動態，選出「本週資金最集中、最具爆發力的 3 個『細分』產業板塊」。
+    （注意：絕對不要只說"科技股"或"半導體"這種大範圍，請精確到例如："矽光子"、"液冷散熱"、"AI PC"、"鈾礦核能"、"固態電池"等細分賽道）。
+
+    【選股嚴格紀律 - 違反將導致系統崩潰】：
+    1. 為這 3 個板塊各挑選 3~4 檔最具代表性、流動性極佳（市值必須 > 20億美元）的美股代碼。
+    2. 絕對禁止包含已退市、被收購的股票（如 SNDK）、OTC 股票或任何槓桿 ETF。
+    3. 代碼必須是純大寫英文字母，且目前在 Yahoo Finance 上完全有效。
+
+    請務必「只」輸出乾淨的 JSON 格式，不要有任何 Markdown 標記 (```json) 或其他說明文字：
+    {{"sector_names": "板塊A, 板塊B, 板塊C", "tickers": ["代碼1", "代碼2", "代碼3"]}}
     """
+    
     backoff_time = 5
     for attempt in range(max_retries):
         try:
             print(f"🧠 正在請 AI 偵測今日熱門板塊... (嘗試 {attempt+1}/{max_retries})")
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
-            data = json.loads(response.text.replace('```json', '').replace('```', '').strip())
-            return [t.strip().upper() for t in data.get("tickers", fallback_tickers)], data.get("sector_names", fallback_desc)
+            
+            # 🛡️ 軍規級 JSON 清理：利用正則表達式強行提取 {} 中的內容，無視 AI 的多餘廢話
+            raw_text = response.text
+            json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            
+            if json_match:
+                clean_json_str = json_match.group(0)
+                data = json.loads(clean_json_str)
+                
+                # 🛡️ 代碼二次過濾：去除可能帶有特殊符號或空格的無效代碼
+                valid_tickers = [
+                    t.strip().upper() for t in data.get("tickers", fallback_tickers) 
+                    if t.strip().isalpha() and len(t.strip()) <= 5
+                ]
+                
+                return valid_tickers, data.get("sector_names", fallback_desc)
+            else:
+                raise ValueError("AI 回應中找不到有效的 JSON 格式")
+                
         except Exception as e:
             error_msg = str(e).lower()
             if "429" in error_msg or "503" in error_msg or "quota" in error_msg:
@@ -129,7 +155,10 @@ def get_ai_dynamic_sectors(max_retries=3):
                 time.sleep(backoff_time)
                 backoff_time *= 2
             else:
+                print(f"⚠️ 解析 AI 熱門板塊資料失敗: {e}")
+                # 發生非超時錯誤（例如 JSON 解析失敗）時，不重試直接回傳備用名單
                 return fallback_tickers, fallback_desc
+                
     return fallback_tickers, fallback_desc
 
 # ==========================================
