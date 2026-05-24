@@ -66,8 +66,12 @@ def get_macro_regime():
         qqq_rsi = (100 - (100 / (1 + gain / loss))).fillna(100)
         latest_qqq_rsi = float(qqq_rsi.iloc[-1])
         
-        vix_prices = df_closes['^VIX'].dropna()
-        latest_vix = float(vix_prices.iloc[-1])
+        # 🛡️ 增強 VIX 抓取穩定度 (防止 Yahoo Finance 盤後短暫 NaN)
+        vix_prices = df_closes['^VIX'].ffill().dropna()
+        if len(vix_prices) == 0:
+            latest_vix = 20.0  # 默認中性值防止崩潰
+        else:
+            latest_vix = float(vix_prices.iloc[-1])
         
         signal = "UNKNOWN"
         if latest_vix > 25 or latest_qqq_rsi < 30:
@@ -208,8 +212,9 @@ def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
         if earn_ts:
             earn_date = datetime.fromtimestamp(earn_ts)
             days = (earn_date.date() - datetime.today().date()).days
+            # 🛡️ 修復財報地雷預警：因為期權操作動輒 30 天以上，將警告天數從 5 天拉長至 30 天
             if days >= 0:
-                days_to_earnings = f"⚠️ {days}天後" if days <= 5 else f"{days}天後"
+                days_to_earnings = f"⚠️ {days}天後" if days <= 30 else f"{days}天後"
             else:
                 days_to_earnings = "近期已發布"
 
@@ -319,22 +324,25 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             
             volumes = df_volumes[ticker].dropna()
             rvol, vol_surge = 0.0, False
+            rvol_display = "-"
+            
             if len(volumes) >= 20:
                 vol_ma20 = float(volumes.rolling(20).mean().iloc[-1])
                 if pd.notna(vol_ma20) and vol_ma20 > 0:
                     rvol = round(float(volumes.iloc[-1]) / vol_ma20, 2)
                     vol_surge = rvol > 1.2 
+                    # 🛡️ 增強 RVOL (爆量) 視覺標記
+                    rvol_display = f"<span style='color:#c0392b; font-weight:bold;'>{rvol}x (爆量)</span>" if rvol > 1.5 else f"{rvol}x"
             
             is_portfolio, is_hot = ticker in portfolio_list, ticker in hot_sectors_list
             signal_type = None
             
             if is_hot:
-                # ✨ RSI 鈍化與破線邏輯升級
                 if latest_rsi >= 75:
                     if latest_price > ma5:
-                        signal_type = "高檔鈍化(軋空)"  # RSI 極高但死守 5 日線，強勢主升段
+                        signal_type = "高檔鈍化(軋空)"
                     else:
-                        signal_type = "極端超買(破線)"  # RSI 極高且跌破 5 日線，動能竭盡
+                        signal_type = "極端超買(破線)" 
                 elif latest_rsi > 65 and bias_20 > 5 and vol_surge: signal_type = "動能突破"
                 elif 55 <= latest_rsi <= 65 and abs(bias_20) <= 5 and not vol_surge: signal_type = "高檔震盪"
                 elif 40 <= latest_rsi < 55 and bias_20 > -3: signal_type = "強勢回檔"
@@ -363,7 +371,7 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
                     'data': {
                         '身份': identity, '代碼': ticker, '型態': signal_type, '現價': round(latest_price, 2),
                         'Upside': upside_val, 
-                        'RSI': round(latest_rsi, 2), '熱度(RVOL)': f"{rvol}x", '財報日': d_earn, 
+                        'RSI': round(latest_rsi, 2), '熱度(RVOL)': rvol_display, '財報日': d_earn, 
                         '當前 IV': strat['當前 IV'],
                         '評分': int(f_score),
                         '綜合建議': strat['綜合建議'], '期權履約價': strat['期權履約價'], '最新新聞': l_news
@@ -373,11 +381,11 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
 
     raw_candidates.sort(key=lambda x: x['sort_weight'], reverse=True)
     
-    # 過濾掉不需要 AI 深入分析的標的
+    # 🛡️ 解除 AI 封印：強制將「我的持倉」納入 AI 分析行列，上限調至 8 檔
     ai_target_candidates = [
         item for item in raw_candidates 
-        if item['data']['型態'] not in ["持倉監控", "高檔震盪", "趨勢破壞", "極端超買(破線)"]
-    ][:5]
+        if item['data']['身份'] == '💼 我的持倉' or item['data']['型態'] not in ["高檔震盪", "趨勢破壞", "極端超買(破線)"]
+    ][:8]
     
     print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，啟動 AI 狙擊分析...")
     
@@ -395,8 +403,7 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
         elif "⚠️" in stock['財報日']: 
             sop = "🛑 財報將近：禁止 Sell Put 避免跳空。"
         elif "趨勢破壞" in stock['型態']: 
-            sop = "🛑 趨勢破壞：熱門股轉弱，無條件避開或停損。"
-        # ✨ 新增鈍化與破線的 SOP 判斷
+            sop = "🛑 趨勢破壞：熱門股轉弱，無条件避開或停損。"
         elif "高檔鈍化" in stock['型態']: 
             sop = "🔥 情境D (主升段軋空)：RSI已鈍化。絕對禁止做空！持有正股並以 5 日均線作移動停損。"
         elif "極端超買" in stock['型態']: 
@@ -410,7 +417,7 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
         elif "超跌反彈" in stock['型態']: 
             sop = "🥉 情境C (優質錯殺)：保守 Sell Put 收租。"
             
-        # 🚦 大盤紅綠燈強制覆寫 (Override Mechanism)
+        # 🚦 大盤紅綠燈強制覆寫
         if macro_signal == "RED":
             if "情境A" in sop or "情境B" in sop or "情境C" in sop:
                 sop = "🛑 <b>[紅燈警戒]</b> 系統性風險/恐慌蔓延。禁止所有做多建倉！僅限觀望或買入 Put 避險。"
@@ -501,7 +508,7 @@ if __name__ == "__main__":
                 <li><b>🔥 情境 D (主升段軋空)：</b>RSI > 75 且股價穩站 5 日線上，代表極強勢。絕對禁止做空，沿 5 日線移動停損。</li>
                 <li><b>⚠️ 情境 E (超買且破線)：</b>高檔跌破 5 日線，動能竭盡。立即鎖定利潤或建倉 Bear Call Spread。</li>
                 <li><b>🔥 IV 偏高策略：</b>權利金極度昂貴，絕對禁止單買期權 (Long Call/Put)，強烈建議當賣方 (Sell Put) 收租。</li>
-                <li><b>🛑 絕對避開：</b>出現「趨勢破壞 (個股RSI<40)」、AI 判定風險、財報 5 天內，無條件空手觀望。</li>
+                <li><b>🛑 絕對避開：</b>出現「趨勢破壞 (個股RSI<40)」、AI 判定風險、財報 30 天內，無條件空手觀望。</li>
             </ul>
         </div>
         """
