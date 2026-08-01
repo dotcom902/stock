@@ -1,4 +1,10 @@
 import yfinance as yf
+
+# 避免 GitHub Actions 環境下 yfinance SQLite cache 鎖定問題
+try:
+    yf.set_tz_cache_location("/tmp/yf_tz_cache")
+except Exception:
+    pass
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -294,9 +300,21 @@ def get_nasdaq_100_tickers():
         url = get_safe_url('aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvTmFzZGFxLTEwMA==')
         response = cffi_requests.get(url, impersonate="chrome110", timeout=15)
         tables = pd.read_html(response.text)
+        
         for table in tables:
-            if 'Ticker' in table.columns: return table['Ticker'].tolist(), "✅ Nasdaq 100 成功"
-    except: return ['AAPL', 'MSFT'], "⚠️ 抓取失敗"
+            # 相容 Wikipedia 可能出現的欄位名稱 ('Ticker' 或 'Symbol')
+            for col in ['Ticker', 'Symbol']:
+                if col in table.columns:
+                    ticker_list = table[col].dropna().astype(str).str.strip().tolist()
+                    if ticker_list:
+                        return ticker_list, "✅ Nasdaq 100 成功"
+                        
+    except Exception as e:
+        print(f"⚠️ 抓取 Nasdaq 100 發生異常: {e}")
+
+    # 兜底保障：無論是欄位比對失敗還是網絡 Exception，都嚴格保證回傳 (list, str) 二元組，絕不回傳 None
+    fallback_tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'COST', 'AMD']
+    return fallback_tickers, "⚠️ 抓取失敗 (已使用備用清單)"
 
 def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
     score, latest_news_str, sector, days_to_earnings, news_list_raw, upside_str = 50, "無最新新聞", "未知板塊", "未知", [], "-"
