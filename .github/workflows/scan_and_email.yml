@@ -13,6 +13,7 @@ jobs:
       MAIL_USER: ${{ secrets.MAIL_USER }}
       MAIL_PASS: ${{ secrets.MAIL_PASS }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }} # ✨ 新增：讓程式能讀取你的 AI 金鑰
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
