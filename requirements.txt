@@ -6,3 +6,4 @@ curl_cffi>=0.6.0
 google-genai>=0.3.0
 lxml>=4.9.0
 html5lib>=1.1
+openbb>=5.0.0

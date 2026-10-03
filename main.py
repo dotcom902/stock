@@ -7,7 +7,7 @@ except Exception:
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import warnings
 import os
 import smtplib
@@ -15,102 +15,421 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import xml.etree.ElementTree as ET
 import urllib.parse
-import time  
+import time
 import json
-import base64  
-import requests  
-import re  
-from google import genai  
+import base64
+import requests
+import re
+from google import genai
 from curl_cffi import requests as cffi_requests
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
+
+# ==========================================
+# OpenBB 資料層（失敗時自動回退 yfinance / FRED / Google News）
+# ==========================================
+OBB_AVAILABLE = False
+obb = None
+try:
+    from openbb import obb as _obb
+
+    obb = _obb
+    OBB_AVAILABLE = True
+except Exception as e:
+    print(f"⚠️ OpenBB 未載入，改用 yfinance / 原生 API: {e}")
+
 
 def get_safe_url(b64_str):
-    return base64.b64decode(b64_str).decode('utf-8')
+    return base64.b64decode(b64_str).decode("utf-8")
+
 
 # ==========================================
 # 🔑 API Keys
 # ==========================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
-AI_MODEL_NAME = 'gemini-2.5-flash'  
+FMP_API_KEY = os.environ.get("FMP_API_KEY")
+AI_MODEL_NAME = "gemini-2.5-flash"
 
 ai_client = None
 if GEMINI_API_KEY:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 DAILY_QUOTA_EXHAUSTED = False
+DATA_SOURCE_NOTES = []
 
-MY_PORTFOLIO = ['NVDA', 'TSM', 'CRWV', 'PLTR', 'MSTR', 'MU', 'INTC'] 
+if OBB_AVAILABLE:
+    try:
+        if FRED_API_KEY:
+            obb.user.credentials.fred_api_key = FRED_API_KEY
+        if FMP_API_KEY:
+            obb.user.credentials.fmp_api_key = FMP_API_KEY
+    except Exception:
+        pass
+
+MY_PORTFOLIO = ["NVDA", "TSM", "CRWV", "PLTR", "MSTR", "MU", "INTC"]
 CORE_WATCHLIST = [
-    'COHR', 'LITE', 'FN', 'NTAP',       
-    'AMD', 'ARM', 'MU', 'SNDK', 'SMCI', 
-    'ASTS', 'RKLB', 'LUNR', 'BKSY',      
+    "COHR", "LITE", "FN", "NTAP",
+    "AMD", "ARM", "MU", "SNDK", "SMCI",
+    "ASTS", "RKLB", "LUNR", "BKSY",
 ]
+
+
+def _note(msg):
+    if msg not in DATA_SOURCE_NOTES:
+        DATA_SOURCE_NOTES.append(msg)
+        print(msg)
+
+
+def _period_to_start(period):
+    days = {"5d": 8, "1mo": 32, "3mo": 95, "6mo": 190, "1y": 370}.get(period, 95)
+    return (datetime.today() - timedelta(days=days)).date().isoformat()
+
+
+def _normalize_ohlcv(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out.columns = [str(c).strip().lower() for c in out.columns]
+    rename = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "adj_close": "Adj Close",
+        "adjclose": "Adj Close",
+        "volume": "Volume",
+        "symbol": "symbol",
+        "date": "date",
+    }
+    out = out.rename(columns={c: rename.get(c, c) for c in out.columns})
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"])
+        out = out.set_index("date")
+    out.index = pd.to_datetime(out.index)
+    out = out.sort_index()
+    return out
+
+
+def _obb_historical(symbols, period="3mo"):
+    start = _period_to_start(period)
+    frames = []
+    joined = ",".join(symbols)
+    attempts = [
+        {"symbol": joined, "start_date": start, "provider": "yfinance"},
+        {"symbol": joined, "start_date": start},
+    ]
+    last_err = None
+    for kwargs in attempts:
+        try:
+            result = obb.equity.price.historical(**kwargs)
+            raw = result.to_dataframe()
+            if raw is None or raw.empty:
+                continue
+            raw = _normalize_ohlcv(raw)
+            if "symbol" not in raw.columns and len(symbols) == 1:
+                raw["symbol"] = symbols[0]
+            if "symbol" in raw.columns:
+                frames.append(raw)
+                break
+            if len(symbols) == 1 and "Close" in raw.columns:
+                raw["symbol"] = symbols[0]
+                frames.append(raw)
+                break
+        except Exception as e:
+            last_err = e
+            continue
+    if not frames:
+        # 少量標的改逐檔抓，避免整批失敗
+        if len(symbols) <= 8:
+            for sym in symbols:
+                try:
+                    result = obb.equity.price.historical(
+                        symbol=sym, start_date=start, provider="yfinance"
+                    )
+                    raw = _normalize_ohlcv(result.to_dataframe())
+                    if raw.empty or "Close" not in raw.columns:
+                        continue
+                    raw["symbol"] = sym
+                    frames.append(raw)
+                except Exception as e:
+                    last_err = e
+        if not frames:
+            raise RuntimeError(last_err or "OpenBB historical empty")
+
+    long_df = pd.concat(frames, axis=0)
+    close_wide = long_df.pivot_table(index=long_df.index, columns="symbol", values="Close", aggfunc="last")
+    vol_wide = long_df.pivot_table(index=long_df.index, columns="symbol", values="Volume", aggfunc="last")
+    open_wide = long_df.pivot_table(index=long_df.index, columns="symbol", values="Open", aggfunc="last") if "Open" in long_df.columns else close_wide
+    high_wide = long_df.pivot_table(index=long_df.index, columns="symbol", values="High", aggfunc="last") if "High" in long_df.columns else close_wide
+    low_wide = long_df.pivot_table(index=long_df.index, columns="symbol", values="Low", aggfunc="last") if "Low" in long_df.columns else close_wide
+
+    # 對齊 yfinance 多標的結構：df['Close'][ticker]
+    arrays = [
+        ["Open"] * len(open_wide.columns) + ["High"] * len(high_wide.columns)
+        + ["Low"] * len(low_wide.columns) + ["Close"] * len(close_wide.columns)
+        + ["Volume"] * len(vol_wide.columns),
+        list(open_wide.columns) + list(high_wide.columns) + list(low_wide.columns)
+        + list(close_wide.columns) + list(vol_wide.columns),
+    ]
+    wide = pd.concat(
+        [open_wide, high_wide, low_wide, close_wide, vol_wide],
+        axis=1,
+    )
+    wide.columns = pd.MultiIndex.from_arrays(arrays)
+    return wide.sort_index()
+
+
+def _yf_download(symbols, period="3mo"):
+    return yf.download(symbols, period=period, progress=False, threads=True, auto_adjust=False)
+
+
+def download_prices(symbols, period="3mo"):
+    """優先 OpenBB，失敗或大批標的時回退 yfinance。回傳 yfinance 相容寬表。"""
+    symbols = list(dict.fromkeys([s.strip() for s in symbols if s]))
+    if not symbols:
+        return pd.DataFrame()
+
+    use_obb = OBB_AVAILABLE and len(symbols) <= 12
+    if use_obb:
+        try:
+            data = _obb_historical(symbols, period)
+            if data is not None and not data.empty:
+                _note("📡 價格來源: OpenBB")
+                return data
+        except Exception as e:
+            _note(f"⚠️ OpenBB 價格失敗，改用 yfinance: {e}")
+
+    data = _yf_download(symbols, period)
+    _note("📡 價格來源: yfinance")
+    return data
+
+
+def _series_from_wide(df, field, ticker=None):
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    if isinstance(df.columns, pd.MultiIndex):
+        if field not in df.columns.get_level_values(0):
+            return pd.Series(dtype=float)
+        block = df[field]
+        if ticker is not None and ticker in block.columns:
+            return block[ticker]
+        if ticker is None and isinstance(block, pd.DataFrame) and block.shape[1] == 1:
+            return block.iloc[:, 0]
+        return block
+    if field in df.columns:
+        return df[field]
+    return pd.Series(dtype=float)
+
+
+def get_stock_info(ticker):
+    """公司資料：OpenBB profile → yfinance.info"""
+    info = {}
+    if OBB_AVAILABLE:
+        try:
+            profile = obb.equity.profile(symbol=ticker, provider="yfinance")
+            pdf = profile.to_dataframe()
+            if pdf is not None and not pdf.empty:
+                row = pdf.iloc[0].to_dict()
+                lower = {str(k).lower(): v for k, v in row.items()}
+                info["industry"] = lower.get("industry") or lower.get("industry_category")
+                info["sector"] = lower.get("sector")
+                info["currentPrice"] = lower.get("last_price") or lower.get("price") or lower.get("currentprice")
+                info["targetMeanPrice"] = lower.get("target_price") or lower.get("targetmeanprice")
+                info["recommendationKey"] = str(lower.get("recommendation") or lower.get("recommendationkey") or "").lower()
+                info["earningsTimestamp"] = lower.get("earnings_timestamp") or lower.get("earningstimestamp")
+        except Exception:
+            pass
+        try:
+            tgt = obb.equity.estimates.price_target(symbol=ticker, provider="yfinance")
+            tdf = tgt.to_dataframe()
+            if tdf is not None and not tdf.empty:
+                for col in tdf.columns:
+                    if "mean" in str(col).lower() or "target" in str(col).lower():
+                        val = pd.to_numeric(tdf[col], errors="coerce").dropna()
+                        if not val.empty:
+                            info["targetMeanPrice"] = float(val.iloc[-1])
+                            break
+        except Exception:
+            pass
+
+    if not info or not info.get("industry"):
+        try:
+            yinfo = yf.Ticker(ticker).info or {}
+            for k, v in yinfo.items():
+                if k not in info or info.get(k) in (None, "", 0):
+                    info[k] = v
+        except Exception:
+            pass
+    return info
+
+
+def get_obb_news(ticker_symbol, limit=3):
+    if not OBB_AVAILABLE:
+        return []
+    items = []
+    for call in (
+        lambda: obb.news.company(symbol=ticker_symbol, limit=limit, provider="yfinance"),
+        lambda: obb.news.company(symbol=ticker_symbol, limit=limit),
+    ):
+        try:
+            result = call()
+            df = result.to_dataframe()
+            if df is None or df.empty:
+                continue
+            title_col = None
+            for c in df.columns:
+                if str(c).lower() in ("title", "headline", "text"):
+                    title_col = c
+                    break
+            if title_col is None:
+                continue
+            for title in df[title_col].dropna().astype(str).tolist()[:limit]:
+                items.append({"title": title.split(" - ")[0]})
+            if items:
+                _note("📰 新聞來源: OpenBB")
+                return items
+        except Exception:
+            continue
+    return []
+
+
+def get_obb_option_puts(ticker, current_price):
+    if not OBB_AVAILABLE:
+        return None
+    try:
+        result = obb.derivatives.options.chains(symbol=ticker, provider="yfinance")
+        df = result.to_dataframe()
+        if df is None or df.empty:
+            return None
+        cols = {str(c).lower(): c for c in df.columns}
+        strike_c = cols.get("strike")
+        bid_c = cols.get("bid")
+        iv_c = cols.get("implied_volatility") or cols.get("impliedvolatility") or cols.get("iv")
+        type_c = cols.get("option_type") or cols.get("type") or cols.get("optiontype")
+        exp_c = cols.get("expiration") or cols.get("expiry") or cols.get("expiration_date")
+        if not all([strike_c, bid_c, iv_c, type_c, exp_c]):
+            return None
+        work = df.copy()
+        work["_type"] = work[type_c].astype(str).str.lower()
+        puts = work[work["_type"].str.contains("put")]
+        if puts.empty:
+            return None
+        puts = puts.copy()
+        puts["_exp"] = pd.to_datetime(puts[exp_c], errors="coerce")
+        puts["_strike"] = pd.to_numeric(puts[strike_c], errors="coerce")
+        puts["_bid"] = pd.to_numeric(puts[bid_c], errors="coerce")
+        puts["_iv"] = pd.to_numeric(puts[iv_c], errors="coerce")
+        puts = puts.dropna(subset=["_exp", "_strike"])
+        today = pd.Timestamp(datetime.today().date())
+        puts["_dte"] = (puts["_exp"] - today).dt.days
+        window = puts[(puts["_dte"] >= 20) & (puts["_dte"] <= 45)]
+        if window.empty:
+            window = puts
+        target_exp = window.sort_values("_dte")["_exp"].iloc[0]
+        chain = puts[puts["_exp"] == target_exp].copy()
+        _note("🎯 選擇權來源: OpenBB")
+        return chain, target_exp.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
 
 # ==========================================
 # 🚦 宏觀紅綠燈 (FRED + SMH/VIX/QQQ)
 # ==========================================
 def fetch_fred_data(series_id, limit=20):
-    if not FRED_API_KEY: return []
+    if OBB_AVAILABLE:
+        for kwargs in (
+            {"symbol": series_id, "provider": "federal_reserve"},
+            {"symbol": series_id},
+        ):
+            try:
+                result = obb.economy.fred_series(**kwargs)
+                df = result.to_dataframe()
+                if df is None or df.empty:
+                    continue
+                value_col = None
+                for c in df.columns:
+                    if str(c).lower() in ("value", "close", series_id.lower()):
+                        value_col = c
+                        break
+                if value_col is None:
+                    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+                    value_col = num_cols[-1] if num_cols else None
+                if value_col is None:
+                    continue
+                vals = pd.to_numeric(df[value_col], errors="coerce").dropna().astype(float).tolist()
+                if vals:
+                    _note("🌍 FRED 來源: OpenBB")
+                    return list(reversed(vals))[:limit]
+            except Exception:
+                continue
+
+    if not FRED_API_KEY:
+        return []
     try:
         url = "https://api.stlouisfed.org/fred/series/observations"
         params = {
-            'series_id': series_id,
-            'api_key': FRED_API_KEY,
-            'file_type': 'json',
-            'sort_order': 'desc',
-            'limit': limit
+            "series_id": series_id,
+            "api_key": FRED_API_KEY,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": limit,
         }
         res = requests.get(url, params=params, timeout=10)
         if res.status_code == 200:
             data = res.json()
-            return [float(x['value']) for x in data['observations'] if x['value'] != '.']
+            _note("🌍 FRED 來源: FRED API")
+            return [float(x["value"]) for x in data["observations"] if x["value"] != "."]
     except Exception as e:
         print(f"⚠️ FRED 抓取 {series_id} 失敗: {e}")
     return []
 
+
+def _rsi(prices, n=14):
+    prices = pd.Series(prices).dropna()
+    delta = prices.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
+    loss = -delta.clip(upper=0).ewm(alpha=1 / n, adjust=False).mean()
+    rsi = (100 - (100 / (1 + gain / loss))).replace([np.inf, -np.inf], np.nan).fillna(50)
+    return rsi
+
+
 def get_macro_regime():
     try:
         print("🌍 正在掃描總經指標 (FRED 利率/利差) 與 大盤動能 (QQQ/SMH/VIX)...")
-        df_data = yf.download(['QQQ', 'SMH', '^VIX'], period="3mo", progress=False)
-        df_closes = df_data['Close']
-        
-        # QQQ RSI
-        qqq_prices = df_closes['QQQ'].dropna()
-        delta_q = qqq_prices.diff()
-        gain_q = delta_q.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
-        loss_q = -delta_q.clip(upper=0).ewm(alpha=1/14, adjust=False).mean()
-        latest_qqq_rsi = float((100 - (100 / (1 + gain_q / loss_q))).fillna(50).iloc[-1])
-        
-        # SMH RSI
-        smh_prices = df_closes['SMH'].dropna()
-        delta_s = smh_prices.diff()
-        gain_s = delta_s.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
-        loss_s = -delta_s.clip(upper=0).ewm(alpha=1/14, adjust=False).mean()
-        latest_smh_rsi = float((100 - (100 / (1 + gain_s / loss_s))).fillna(50).iloc[-1])
+        df_data = download_prices(["QQQ", "SMH", "^VIX"], period="3mo")
+        df_closes = df_data["Close"] if "Close" in df_data else df_data
 
-        # VIX
-        vix_prices = df_closes['^VIX'].ffill().dropna()
-        latest_vix = float(vix_prices.iloc[-1]) if len(vix_prices) > 0 else 20.0
+        qqq_prices = df_closes["QQQ"].dropna() if "QQQ" in df_closes else pd.Series(dtype=float)
+        latest_qqq_rsi = float(_rsi(qqq_prices).iloc[-1]) if len(qqq_prices) else 50.0
+
+        smh_prices = df_closes["SMH"].dropna() if "SMH" in df_closes else pd.Series(dtype=float)
+        latest_smh_rsi = float(_rsi(smh_prices).iloc[-1]) if len(smh_prices) else 50.0
+
+        vix_col = "^VIX" if "^VIX" in df_closes else ("VIX" if "VIX" in df_closes else None)
+        if vix_col:
+            vix_prices = df_closes[vix_col].ffill().dropna()
+            latest_vix = float(vix_prices.iloc[-1]) if len(vix_prices) > 0 else 20.0
+        else:
+            latest_vix = 20.0
 
         fred_str = "▪️ 總經流動性: <i>未設定 FRED API 金鑰，略過分析</i>"
         fred_red_flag = False
         fred_yellow_flag = False
-        
-        if FRED_API_KEY:
-            yields = fetch_fred_data('DGS10')        # 10年期美債殖利率
-            spreads = fetch_fred_data('BAMLH0A0HYM2') # 高收益債信用利差
-            
-            if yields and spreads and len(yields) >= 10 and len(spreads) >= 10:
-                cur_yield, ma10_yield = yields[0], sum(yields[:10]) / 10
-                cur_spread, ma10_spread = spreads[0], sum(spreads[:10]) / 10
-                
-                fred_str = f"▪️ 10年美債殖利率: <b>{cur_yield:.2f}%</b> (10日均: {ma10_yield:.2f}%) | 信用利差: <b>{cur_spread:.2f}%</b>"
-                if cur_spread > ma10_spread * 1.15 or cur_yield > ma10_yield * 1.08:
-                    fred_red_flag = True
-                elif cur_spread > ma10_spread * 1.05 or cur_yield > ma10_yield * 1.03:
-                    fred_yellow_flag = True
+
+        yields = fetch_fred_data("DGS10")
+        spreads = fetch_fred_data("BAMLH0A0HYM2")
+        if yields and spreads and len(yields) >= 10 and len(spreads) >= 10:
+            cur_yield, ma10_yield = yields[0], sum(yields[:10]) / 10
+            cur_spread, ma10_spread = spreads[0], sum(spreads[:10]) / 10
+            fred_str = f"▪️ 10年美債殖利率: <b>{cur_yield:.2f}%</b> (10日均: {ma10_yield:.2f}%) | 信用利差: <b>{cur_spread:.2f}%</b>"
+            if cur_spread > ma10_spread * 1.15 or cur_yield > ma10_yield * 1.08:
+                fred_red_flag = True
+            elif cur_spread > ma10_spread * 1.05 or cur_yield > ma10_yield * 1.03:
+                fred_yellow_flag = True
+        elif not FRED_API_KEY and not yields:
+            fred_str = "▪️ 總經流動性: <i>未設定 FRED API 金鑰，略過分析</i>"
 
         signal = "GREEN"
         if latest_vix > 25 or latest_qqq_rsi < 30 or fred_red_flag:
@@ -121,7 +440,7 @@ def get_macro_regime():
             status_icon, status_text, signal = "🟠", "橘燈 (AI/半導體族群動能轉弱)", "ORANGE"
         else:
             status_icon, status_text, signal = "🟢", "綠燈 (Risk-On / 流動性與動能健康)", "GREEN"
-            
+
         desc = f"""
         <span style='font-size:16px;'>{status_icon}</span> <b>{status_text}</b> <br>
         ▪️ VIX 恐慌指數: <b>{latest_vix:.2f}</b> | QQQ 日線 RSI: <b>{latest_qqq_rsi:.1f}</b> | SMH 日線 RSI: <b>{latest_smh_rsi:.1f}</b><br>
@@ -132,24 +451,28 @@ def get_macro_regime():
         print(f"⚠️ 宏觀指標抓取失敗: {e}")
         return "大盤狀態: 未知", "UNKNOWN"
 
+
 # ==========================================
 # 📊 美股收盤總結與資金流向分析
 # ==========================================
 def get_market_closing_summary(hot_sectors_desc):
     try:
-        indices = {'S&P 500': '^GSPC', 'Nasdaq 100': '^NDX', 'Dow Jones': '^DJI', 'Russell 2000': 'IWM'}
-        df_indices = yf.download(list(indices.values()), period="5d", progress=False)['Close']
-        
+        indices = {"S&P 500": "^GSPC", "Nasdaq 100": "^NDX", "Dow Jones": "^DJI", "Russell 2000": "IWM"}
+        df_indices = download_prices(list(indices.values()), period="5d")
+        close_block = df_indices["Close"] if "Close" in df_indices else df_indices
+
         index_str = ""
         for name, ticker in indices.items():
-            if ticker in df_indices:
-                closes = df_indices[ticker].dropna()
-                if len(closes) >= 2:
-                    today_c, yest_c = float(closes.iloc[-1]), float(closes.iloc[-2])
-                    pct_change = ((today_c - yest_c) / yest_c) * 100
-                    icon = "🟢" if pct_change > 0 else "🔴"
-                    index_str += f"{name}: {today_c:.2f} ({icon} {pct_change:+.2f}%) "
-        
+            col = ticker if ticker in close_block else ticker.replace("^", "")
+            if col not in close_block:
+                continue
+            closes = close_block[col].dropna() if isinstance(close_block, pd.DataFrame) else close_block.dropna()
+            if len(closes) >= 2:
+                today_c, yest_c = float(closes.iloc[-1]), float(closes.iloc[-2])
+                pct_change = ((today_c - yest_c) / yest_c) * 100
+                icon = "🟢" if pct_change > 0 else "🔴"
+                index_str += f"{name}: {today_c:.2f} ({icon} {pct_change:+.2f}%) "
+
         if not ai_client or DAILY_QUOTA_EXHAUSTED:
             return f"<div style='padding:8px; background:#f0f0f0;'>{index_str}</div>"
 
@@ -157,28 +480,30 @@ def get_market_closing_summary(hot_sectors_desc):
         現在是美股收盤後。你是華爾街量化避險基金首席交易員。
         四大指數今日表現：{index_str}
         今日量化系統偵測到資金異常湧入板塊：{hot_sectors_desc}
-        請寫一段約 80-120 字的收盤資金流向速報。言簡意腅，點名資金抽離與聚集處。純文本，重點處用 <b> 加粗，不要使用 Markdown 程式碼區塊。
+        請寫一段約 80-120 字的收盤資金流向速報。言簡意賅，點名資金抽離與聚集處。純文本，重點處用 <b> 加粗，不要使用 Markdown 程式碼區塊。
         """
         response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
-        summary_text = response.text.replace('\n', '<br>')
-        
+        summary_text = response.text.replace("\n", "<br>")
+
         return f"""
         <div style="background-color: #f4f8fb; border-left: 4px solid #2980b9; padding: 12px; margin-bottom: 15px; border-radius: 4px;">
             <div style="font-family: monospace; font-size: 13px; margin-bottom: 8px; font-weight: bold;">{index_str}</div>
             <div style="font-size: 13px; color: #34495e; line-height: 1.5;">{summary_text}</div>
         </div>
         """
-    except Exception as e: 
+    except Exception:
         return ""
+
 
 # ==========================================
 # 🧠 AI 動態板塊偵測
 # ==========================================
 def get_ai_dynamic_sectors(max_retries=3):
     global DAILY_QUOTA_EXHAUSTED
-    fallback_tickers = ['MARA', 'IREN', 'SYM', 'PATH', 'CRWD']
+    fallback_tickers = ["MARA", "IREN", "SYM", "PATH", "CRWD"]
     fallback_desc = "AI 算力基礎設施, 機器視覺, 光通訊"
-    if not ai_client or DAILY_QUOTA_EXHAUSTED: return fallback_tickers, fallback_desc
+    if not ai_client or DAILY_QUOTA_EXHAUSTED:
+        return fallback_tickers, fallback_desc
 
     prompt = """
     你是美股板塊輪動量化分析師。請選出「本週資金流入最顯著、最受關注的 3 個美股細分題材」(例如: 光通訊/CPO、AI液冷、資料中心記憶體)。
@@ -189,30 +514,36 @@ def get_ai_dynamic_sectors(max_retries=3):
     for _ in range(max_retries):
         try:
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
-            json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
+            json_match = re.search(r"\{.*\}", response.text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
-                valid_tickers = [t.strip().upper() for t in data.get("tickers", fallback_tickers) if t.strip().isalpha() and len(t.strip()) <= 5]
+                valid_tickers = [
+                    t.strip().upper()
+                    for t in data.get("tickers", fallback_tickers)
+                    if t.strip().isalpha() and len(t.strip()) <= 5
+                ]
                 return valid_tickers, data.get("sector_names", fallback_desc)
         except Exception:
             time.sleep(2)
     return fallback_tickers, fallback_desc
 
+
 # ==========================================
-# 🤖 AI 個股投研 (已修正 Prompt 傳參污染)
+# 🤖 AI 個股投研
 # ==========================================
 def analyze_stock_with_ai(ticker, sector_name, signal_type, rvol_val, news_list_raw, max_retries=3):
     global DAILY_QUOTA_EXHAUSTED
-    if DAILY_QUOTA_EXHAUSTED or not ai_client: return "⏸️ AI 暫停分析"
-    
+    if DAILY_QUOTA_EXHAUSTED or not ai_client:
+        return "⏸️ AI 暫停分析"
+
     news_text = "\n".join([f"- {item.get('title', '')}" for item in news_list_raw[:3]])
-    
+
     prompt = f"""
     標的：{ticker}（產業：{sector_name}）
     技術狀態：觸發【{signal_type}】，相對量能 RVOL：{rvol_val}。
     最新新聞摘要：
     {news_text}
-    
+
     請以華爾街交易員視角，用 50 字以內說明核心驅動力或潛在風險。
     文末必須以固定標籤總結，格式嚴格為：【建議：可以建倉】、【建議：觀望收租】、【建議：鎖定利潤】或【建議：高風險避開】四選一。
     """
@@ -220,40 +551,55 @@ def analyze_stock_with_ai(ticker, sector_name, signal_type, rvol_val, news_list_
         try:
             response = ai_client.models.generate_content(model=AI_MODEL_NAME, contents=prompt)
             time.sleep(1.5)
-            return response.text.strip().replace('\n', '<br>')
+            return response.text.strip().replace("\n", "<br>")
         except Exception as e:
             if "429" in str(e).lower() or "503" in str(e).lower():
                 time.sleep(3)
-            else: break
+            else:
+                break
     return "⏸️ 伺服器繁忙"
 
+
 def get_robust_news(ticker_symbol):
-    news_items = []
+    news_items = get_obb_news(ticker_symbol, limit=3)
+    if news_items:
+        return news_items
     try:
-        base_url = get_safe_url('aHR0cHM6Ly9uZXdzLmdvb2dsZS5jb20vcnNzL3NlYXJjaD9xPQ==')
+        base_url = get_safe_url("aHR0cHM6Ly9uZXdzLmdvb2dsZS5jb20vcnNzL3NlYXJjaD9xPQ==")
         query = urllib.parse.quote(f"{ticker_symbol} stock")
         url = f"{base_url}{query}&hl=en-US&gl=US&ceid=US:en"
         response = cffi_requests.get(url, impersonate="chrome110", timeout=8)
         if response.status_code == 200:
             root = ET.fromstring(response.text)
-            for item in root.findall('.//channel/item')[:3]:
-                title = item.find('title').text.split(' - ')[0]
-                news_items.append({'title': title})
+            for item in root.findall(".//channel/item")[:3]:
+                title = item.find("title").text.split(" - ")[0]
+                news_items.append({"title": title})
+            if news_items:
+                _note("📰 新聞來源: Google News")
     except Exception:
         pass
     return news_items
 
+
 def get_nasdaq_100_tickers():
     fallback_tickers = [
-        'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'AVGO', 'COST', 'AMD',
-        'ADBE', 'NFLX', 'QCOM', 'TXN', 'INTU', 'AMAT', 'BKNG', 'MU', 'LRCX', 'ADI'
+        "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "COST", "AMD",
+        "ADBE", "NFLX", "QCOM", "TXN", "INTU", "AMAT", "BKNG", "MU", "LRCX", "ADI",
     ]
+    if OBB_AVAILABLE:
+        try:
+            result = obb.index.available(provider="yfinance")
+            df = result.to_dataframe()
+            if df is not None and not df.empty:
+                pass
+        except Exception:
+            pass
     try:
-        url = get_safe_url('aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvTmFzZGFxLTEwMA==')
+        url = get_safe_url("aHR0cHM6Ly9lbi53aWtpcGVkaWEub3JnL3dpa2kvTmFzZGFxLTEwMA==")
         response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
         tables = pd.read_html(response.text)
         for table in tables:
-            for col in ['Ticker', 'Symbol']:
+            for col in ["Ticker", "Symbol"]:
                 if col in table.columns:
                     tickers = table[col].dropna().astype(str).str.strip().tolist()
                     if len(tickers) >= 50:
@@ -262,71 +608,104 @@ def get_nasdaq_100_tickers():
         pass
     return fallback_tickers, "⚠️ 使用 Nasdaq 代表池"
 
-def get_fundamental_sentiment_score(ticker_obj, ticker_symbol):
+
+def get_fundamental_sentiment_score(ticker_symbol):
     score, sector, days_to_earnings, news_list_raw, upside_str = 50, "科技/電子", "近期已發布", [], "-"
     try:
-        info = ticker_obj.info
+        info = get_stock_info(ticker_symbol)
         if info:
-            sector = info.get('industry') or info.get('sector') or "科技/電子"
-            earn_ts = info.get('earningsTimestamp')
+            sector = info.get("industry") or info.get("sector") or "科技/電子"
+            earn_ts = info.get("earningsTimestamp")
             if earn_ts:
-                days = (datetime.fromtimestamp(earn_ts).date() - datetime.today().date()).days
-                days_to_earnings = f"⚠️ {days}天後" if 0 <= days <= 25 else (f"{days}天後" if days > 25 else "近期已公布")
+                try:
+                    ts = float(earn_ts)
+                    days = (datetime.fromtimestamp(ts).date() - datetime.today().date()).days
+                    days_to_earnings = f"⚠️ {days}天後" if 0 <= days <= 25 else (f"{days}天後" if days > 25 else "近期已公布")
+                except Exception:
+                    pass
 
-            c_price = info.get('currentPrice', 0)
-            t_price = info.get('targetMeanPrice', 0)
-            if c_price and t_price and c_price > 0 and t_price > 0:
+            c_price = info.get("currentPrice", 0) or 0
+            t_price = info.get("targetMeanPrice", 0) or 0
+            try:
+                c_price = float(c_price)
+                t_price = float(t_price)
+            except Exception:
+                c_price, t_price = 0, 0
+            if c_price > 0 and t_price > 0:
                 upside = (t_price - c_price) / c_price
-                upside_str = f"+{upside*100:.1f}%" if upside > 0 else f"{upside*100:.1f}%"
-                if upside > 0.15: score += 15
-                elif upside < 0: score -= 10
+                upside_str = f"+{upside * 100:.1f}%" if upside > 0 else f"{upside * 100:.1f}%"
+                if upside > 0.15:
+                    score += 15
+                elif upside < 0:
+                    score -= 10
 
-            rec = info.get('recommendationKey', '')
-            if rec in ['buy', 'strong_buy']: score += 10
-            elif rec in ['sell', 'underperform']: score -= 15
+            rec = str(info.get("recommendationKey", "") or "").lower()
+            if rec in ["buy", "strong_buy", "strongbuy"]:
+                score += 10
+            elif rec in ["sell", "underperform"]:
+                score -= 15
 
         news_list_raw = get_robust_news(ticker_symbol)
-        bull_k = ['upgrade', 'beat', 'growth', 'surge', 'buy', 'record']
-        bear_k = ['downgrade', 'miss', 'cut', 'drop', 'lawsuit', 'sell', 'fall']
+        bull_k = ["upgrade", "beat", "growth", "surge", "buy", "record"]
+        bear_k = ["downgrade", "miss", "cut", "drop", "lawsuit", "sell", "fall"]
         for article in news_list_raw:
-            title = article.get('title', '').lower()
-            if any(k in title for k in bull_k): score += 4
-            if any(k in title for k in bear_k): score -= 5
+            title = article.get("title", "").lower()
+            if any(k in title for k in bull_k):
+                score += 4
+            if any(k in title for k in bear_k):
+                score -= 5
 
         return max(20, min(95, score)), sector, days_to_earnings, news_list_raw, upside_str
     except Exception:
         return 50, "未知", "近期已公布", [], "-"
 
+
 # ==========================================
-# 🎯 選擇權與真實 IV 計算 (徹底修復 6.3% 偽造 IV)
+# 🎯 選擇權與真實 IV 計算
 # ==========================================
-def get_investment_strategy(ticker_obj, current_price):
+def get_investment_strategy(ticker, current_price):
     """
-    抓取 25~45 天內合約，並以平價 (ATM) 合約計算個股真實 IV，以防深度價外合約流動性失真 (6.3% Bug)
+    抓取 25~45 天內合約，並以平價 (ATM) 合約計算個股真實 IV，以防深度價外合約流動性失真
     """
     try:
-        exp_dates = ticker_obj.options
-        if not exp_dates: raise ValueError()
-            
-        valid_dates = [d for d in exp_dates if 20 <= (datetime.strptime(d, '%Y-%m-%d') - datetime.today()).days <= 45]
-        target_date = valid_dates[0] if valid_dates else exp_dates[0]
-        chain = ticker_obj.option_chain(target_date)
-        
-        # 1. 計算真實 ATM IV (取最靠近現價、且 Bid > 0 的 Put/Call 平均 IV)
-        puts = chain.puts
-        if puts.empty: raise ValueError()
-        
+        puts = None
+        target_date = None
+        obb_pack = get_obb_option_puts(ticker, current_price)
+        if obb_pack:
+            chain, target_date = obb_pack
+            puts = pd.DataFrame({
+                "strike": chain["_strike"],
+                "bid": chain["_bid"],
+                "impliedVolatility": chain["_iv"],
+            })
+
+        if puts is None or puts.empty:
+            ticker_obj = yf.Ticker(ticker)
+            exp_dates = ticker_obj.options
+            if not exp_dates:
+                raise ValueError()
+            valid_dates = [
+                d for d in exp_dates
+                if 20 <= (datetime.strptime(d, "%Y-%m-%d") - datetime.today()).days <= 45
+            ]
+            target_date = valid_dates[0] if valid_dates else exp_dates[0]
+            chain = ticker_obj.option_chain(target_date)
+            puts = chain.puts
+            _note("🎯 選擇權來源: yfinance")
+
+        if puts is None or puts.empty:
+            raise ValueError()
+
         puts = puts.copy()
-        puts['atm_diff'] = (puts['strike'] - current_price).abs()
-        atm_puts = puts[puts['bid'] > 0].sort_values(by='atm_diff')
-        
+        puts["atm_diff"] = (puts["strike"] - current_price).abs()
+        atm_puts = puts[puts["bid"] > 0].sort_values(by="atm_diff")
+
         real_iv = None
-        if not atm_puts.empty and atm_puts.iloc[0]['impliedVolatility'] > 0.08:
-            real_iv = float(atm_puts.iloc[0]['impliedVolatility'])
-            
-        # 2. 挑選 10% OTM Sell Put 建議履約價
-        target_puts = puts[puts['strike'] <= current_price * 0.92].sort_values(by='strike', ascending=False)
-        strike = target_puts.iloc[0]['strike'] if not target_puts.empty else round(current_price * 0.9, 1)
+        if not atm_puts.empty and atm_puts.iloc[0]["impliedVolatility"] > 0.08:
+            real_iv = float(atm_puts.iloc[0]["impliedVolatility"])
+
+        target_puts = puts[puts["strike"] <= current_price * 0.92].sort_values(by="strike", ascending=False)
+        strike = target_puts.iloc[0]["strike"] if not target_puts.empty else round(current_price * 0.9, 1)
 
         if real_iv:
             iv_pct = real_iv * 100
@@ -342,113 +721,119 @@ def get_investment_strategy(ticker_obj, current_price):
         else:
             iv_status, iv_level = "約 35% (估計)", "MID"
 
+        date_tail = target_date[-5:] if target_date else "--"
         return {
-            'has_options': True,
-            'strike_desc': f"Put ${strike:g} ({target_date[-5:]})",
-            'iv_status': iv_status,
-            'iv_level': iv_level
+            "has_options": True,
+            "strike_desc": f"Put ${strike:g} ({date_tail})",
+            "iv_status": iv_status,
+            "iv_level": iv_level,
         }
     except Exception:
-        return {'has_options': False, 'strike_desc': '-', 'iv_status': '-', 'iv_level': 'UNKNOWN'}
+        return {"has_options": False, "strike_desc": "-", "iv_status": "-", "iv_level": "UNKNOWN"}
+
 
 # ==========================================
 # 🚀 整合掃描核心與決策引擎
 # ==========================================
 def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, macro_signal):
     all_tickers = list(set(tickers_list + portfolio_list + hot_sectors_list))
-    df_data = yf.download(all_tickers, period="3mo", progress=False) 
-    df_closes, df_volumes = df_data['Close'], df_data['Volume']
-    
+    df_data = download_prices(all_tickers, period="3mo")
+    df_closes, df_volumes = df_data["Close"], df_data["Volume"]
+
     raw_candidates = []
     for ticker in df_closes.columns:
         try:
             prices = df_closes[ticker].dropna()
-            if len(prices) < 20: continue
-            
-            delta = prices.diff()
-            gain = delta.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
-            loss = -delta.clip(upper=0).ewm(alpha=1/14, adjust=False).mean()
-            rsi = (100 - (100 / (1 + gain / loss))).replace([np.inf, -np.inf], np.nan).fillna(50)
+            if len(prices) < 20:
+                continue
+
+            rsi = _rsi(prices)
             latest_rsi = float(rsi.iloc[-1])
             latest_price = float(prices.iloc[-1])
             ma20 = float(prices.rolling(20).mean().iloc[-1])
             bias_20 = ((latest_price - ma20) / ma20) * 100
             ma5 = float(prices.rolling(5).mean().iloc[-1])
-            
+
             volumes = df_volumes[ticker].dropna()
             rvol = 1.0
             if len(volumes) >= 20:
                 vol_ma20 = float(volumes.rolling(20).mean().iloc[-1])
                 if vol_ma20 > 0:
                     rvol = round(float(volumes.iloc[-1]) / vol_ma20, 2)
-            
+
             is_portfolio = ticker in portfolio_list
             is_hot = ticker in hot_sectors_list
             signal_type = None
-            
-            if is_hot:
-                if latest_rsi >= 75: signal_type = "高檔鈍化(軋空)" if latest_price > ma5 else "極端超買(破線)"
-                elif latest_rsi > 62 and bias_20 > 4 and rvol > 1.2: signal_type = "動能突破"
-                elif 50 <= latest_rsi <= 62 and abs(bias_20) <= 5: signal_type = "高檔震盪"
-                elif 40 <= latest_rsi < 52 and bias_20 > -4: signal_type = "強勢回檔"
-                elif latest_rsi < 40: signal_type = "趨勢破壞"
-                elif rvol > 1.5: signal_type = "板塊異動(爆量)"
-            else:
-                if latest_rsi < 35 and bias_20 < -6: signal_type = "超跌反彈"
-                elif latest_rsi > 65 and bias_20 > 5 and rvol > 1.2: signal_type = "動能突破"
 
-            if is_portfolio and not signal_type: signal_type = "持倉監控"
-            
+            if is_hot:
+                if latest_rsi >= 75:
+                    signal_type = "高檔鈍化(軋空)" if latest_price > ma5 else "極端超買(破線)"
+                elif latest_rsi > 62 and bias_20 > 4 and rvol > 1.2:
+                    signal_type = "動能突破"
+                elif 50 <= latest_rsi <= 62 and abs(bias_20) <= 5:
+                    signal_type = "高檔震盪"
+                elif 40 <= latest_rsi < 52 and bias_20 > -4:
+                    signal_type = "強勢回檔"
+                elif latest_rsi < 40:
+                    signal_type = "趨勢破壞"
+                elif rvol > 1.5:
+                    signal_type = "板塊異動(爆量)"
+            else:
+                if latest_rsi < 35 and bias_20 < -6:
+                    signal_type = "超跌反彈"
+                elif latest_rsi > 65 and bias_20 > 5 and rvol > 1.2:
+                    signal_type = "動能突破"
+
+            if is_portfolio and not signal_type:
+                signal_type = "持倉監控"
+
             if signal_type:
-                stock_obj = yf.Ticker(ticker)
-                f_score, sector, d_earn, raw_news, upside_str = get_fundamental_sentiment_score(stock_obj, ticker)
-                strat = get_investment_strategy(stock_obj, latest_price)
-                
+                f_score, sector, d_earn, raw_news, upside_str = get_fundamental_sentiment_score(ticker)
+                strat = get_investment_strategy(ticker, latest_price)
+
                 weight_multiplier = 25 if signal_type in ["強勢回檔", "動能突破", "高檔鈍化(軋空)"] else 10
                 sort_weight = (1000 if is_portfolio else 0) + f_score + (rvol * weight_multiplier)
-                
+
                 raw_candidates.append({
-                    'ticker': ticker,
-                    'is_portfolio': is_portfolio,
-                    'is_hot': is_hot,
-                    'rvol': rvol,
-                    'signal_type': signal_type,
-                    'latest_price': latest_price,
-                    'latest_rsi': latest_rsi,
-                    'upside_str': upside_str,
-                    'sector': sector,
-                    'd_earn': d_earn,
-                    'f_score': f_score,
-                    'strat': strat,
-                    'raw_news': raw_news,
-                    'sort_weight': sort_weight
+                    "ticker": ticker,
+                    "is_portfolio": is_portfolio,
+                    "is_hot": is_hot,
+                    "rvol": rvol,
+                    "signal_type": signal_type,
+                    "latest_price": latest_price,
+                    "latest_rsi": latest_rsi,
+                    "upside_str": upside_str,
+                    "sector": sector,
+                    "d_earn": d_earn,
+                    "f_score": f_score,
+                    "strat": strat,
+                    "raw_news": raw_news,
+                    "sort_weight": sort_weight,
                 })
         except Exception:
             continue
 
-    raw_candidates.sort(key=lambda x: x['sort_weight'], reverse=True)
-    ai_targets = [c for c in raw_candidates if c['signal_type'] not in ["持倉監控", "高檔震盪", "趨勢破壞"]][:8]
-    
+    raw_candidates.sort(key=lambda x: x["sort_weight"], reverse=True)
+    ai_targets = [c for c in raw_candidates if c["signal_type"] not in ["持倉監控", "高檔震盪", "趨勢破壞"]][:8]
+
     print(f"\n🎯 系統篩選出 {len(raw_candidates)} 檔標的，啟動 AI 深度投研...")
-    
+
     results = []
     for item in raw_candidates:
-        ticker = item['ticker']
-        sig = item['signal_type']
-        strat = item['strat']
-        iv_lvl = strat['iv_level']
-        
-        # 1. AI 投研分析 (傳送乾淨參數，避免 HTML 污染)
+        ticker = item["ticker"]
+        sig = item["signal_type"]
+        strat = item["strat"]
+        iv_lvl = strat["iv_level"]
+
         if item in ai_targets:
-            ai_view = analyze_stock_with_ai(ticker, item['sector'], sig, f"{item['rvol']}x", item['raw_news'])
+            ai_view = analyze_stock_with_ai(ticker, item["sector"], sig, f"{item['rvol']}x", item["raw_news"])
         else:
             ai_view = "<i>系統日常監控中</i>"
-            
-        # 2. 完美結合「型態 × 波動率 (IV) × 宏觀」的無衝突 SOP 決策引擎
+
         sop = ""
         is_vetoed = "高風險避開" in ai_view or "⚠️" in ai_view
-        near_earnings = "⚠️" in item['d_earn']
-        
+        near_earnings = "⚠️" in item["d_earn"]
+
         if is_vetoed:
             sop = "<span style='color:#c0392b;font-weight:bold;'>🛑 AI 否決</span>：技術/基本面風險過高，嚴禁建倉。"
         elif near_earnings:
@@ -475,74 +860,76 @@ def scan_market_opportunities(tickers_list, portfolio_list, hot_sectors_list, ma
             sop = "⏳ <b>橫盤收斂</b>：持股者可做 <b>Covered Call</b> 賣出價外買權賺取時間價值。"
         elif sig == "超跌反彈":
             sop = "🥉 <b>情境C (價值錯殺)</b>：保守者可於強支撐下方 <b>Sell Put</b> 收租，跌破前低即停損。"
-        else: # 持倉監控
+        else:
             sop = "🔹 <b>核心持股</b>：維持原定部位配置，跌破月線（MA20）才需減碼。"
 
-        # 疊加宏觀過濾器
         if macro_signal == "RED" and any(k in sop for k in ["情境A", "情境B", "情境C"]):
             sop = "🛑 <b>[紅燈警戒]</b> 流動性緊縮與大盤恐慌，全面沒收做多信號，僅限觀望或對沖！"
         elif (macro_signal == "YELLOW" or macro_signal == "ORANGE") and "情境B" in sop:
             sop = "⚠️ <b>[黃燈提示]</b> 大盤過熱或晶片動能減弱，<b>取消突破追高</b>，改為分批獲利了結。"
 
-        # 標籤樣式格式化
-        sector_short = (item['sector'][:12] + "..") if len(item['sector']) > 12 else item['sector']
+        sector_short = (item["sector"][:12] + "..") if len(item["sector"]) > 12 else item["sector"]
         badge = ""
-        if item['is_portfolio']: badge = "<span style='background:#2980b9; color:white; padding:1px 5px; border-radius:3px; font-size:10px;'>持倉</span> "
-        if item['is_hot']: badge += "<span style='background:#e67e22; color:white; padding:1px 5px; border-radius:3px; font-size:10px;'>熱門</span>"
-        
+        if item["is_portfolio"]:
+            badge = "<span style='background:#2980b9; color:white; padding:1px 5px; border-radius:3px; font-size:10px;'>持倉</span> "
+        if item["is_hot"]:
+            badge += "<span style='background:#e67e22; color:white; padding:1px 5px; border-radius:3px; font-size:10px;'>熱門</span>"
+
         ticker_display = f"<b>{ticker}</b><br>{badge}"
-        rvol_display = f"<b style='color:#c0392b;'>{item['rvol']}x 🔥</b>" if item['rvol'] >= 1.5 else f"{item['rvol']}x"
-        
-        opt_info = f"{strat['strike_desc']}<br>{strat['iv_status']}" if strat['has_options'] else "<span style='color:#95a5a6;'>無期權</span>"
+        rvol_display = f"<b style='color:#c0392b;'>{item['rvol']}x 🔥</b>" if item["rvol"] >= 1.5 else f"{item['rvol']}x"
+        opt_info = f"{strat['strike_desc']}<br>{strat['iv_status']}" if strat["has_options"] else "<span style='color:#95a5a6;'>無期權</span>"
 
         results.append({
-            '標的 / 板塊': f"{ticker_display}<br><span style='color:#7f8c8d; font-size:11px;'>{sector_short}</span>",
-            '現價 (Upside)': f"<b>${item['latest_price']:.2f}</b><br><span style='color:#27ae60; font-size:11px;'>{item['upside_str']}</span>",
-            '型態與量能': f"<b>{sig}</b><br><span style='font-size:11px;'>RSI: {item['latest_rsi']:.1f} | 量: {rvol_display}</span>",
-            '財報倒數': item['d_earn'],
-            '期權策略 & IV': opt_info,
-            '評分': f"<b>{int(item['f_score'])}</b>",
-            '🤖 AI 投研觀點': ai_view,
-            '🎯 實戰 SOP 操作指引': sop
+            "標的 / 板塊": f"{ticker_display}<br><span style='color:#7f8c8d; font-size:11px;'>{sector_short}</span>",
+            "現價 (Upside)": f"<b>${item['latest_price']:.2f}</b><br><span style='color:#27ae60; font-size:11px;'>{item['upside_str']}</span>",
+            "型態與量能": f"<b>{sig}</b><br><span style='font-size:11px;'>RSI: {item['latest_rsi']:.1f} | 量: {rvol_display}</span>",
+            "財報倒數": item["d_earn"],
+            "期權策略 & IV": opt_info,
+            "評分": f"<b>{int(item['f_score'])}</b>",
+            "🤖 AI 投研觀點": ai_view,
+            "🎯 實戰 SOP 操作指引": sop,
         })
-        
+
     return pd.DataFrame(results)
+
 
 # ==========================================
 # 📧 郵件發送模組
 # ==========================================
 def send_scan_report_mail(subject, body, to_emails_str, from_email, app_password):
-    recipient_list = [e.strip() for e in to_emails_str.split(',') if e.strip()]
+    recipient_list = [e.strip() for e in to_emails_str.split(",") if e.strip()]
     msg = MIMEMultipart()
-    msg['From'] = from_email
-    msg['To'] = to_emails_str
-    msg['Subject'] = subject
-    msg.attach(MIMEText(f"<html><body>{body}</body></html>", 'html'))
-    
+    msg["From"] = from_email
+    msg["To"] = to_emails_str
+    msg["Subject"] = subject
+    msg.attach(MIMEText(f"<html><body>{body}</body></html>", "html"))
+
     try:
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(from_email, app_password)
             server.sendmail(from_email, recipient_list, msg.as_string())
         print(f"📧 報告已成功寄送至 {len(recipient_list)} 位收件人!")
-    except Exception as e: 
+    except Exception as e:
         print(f"❌ 寄信失敗: {e}")
+
 
 # ==========================================
 # 🏁 主程式進入點
 # ==========================================
 if __name__ == "__main__":
+    print(f"🔧 OpenBB: {'啟用' if OBB_AVAILABLE else '未安裝，使用備援資料源'}")
     macro_desc, macro_signal = get_macro_regime()
     ndx, _ = get_nasdaq_100_tickers()
     hot_tickers, hot_desc = get_ai_dynamic_sectors()
     market_summary_html = get_market_closing_summary(hot_desc)
-    
+
     combined_watchlist = list(set(hot_tickers + CORE_WATCHLIST))
     target_df = scan_market_opportunities(ndx, MY_PORTFOLIO, combined_watchlist, macro_signal)
-    
+
     if not target_df.empty:
         html_table = target_df.to_html(index=False, escape=False)
-        
+
         html_style = """
         <style>
             body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.5; }
@@ -563,7 +950,8 @@ if __name__ == "__main__":
             td:nth-child(7), td:nth-child(8) { text-align: left; font-size: 11px; line-height: 1.4; }
         </style>
         """
-        
+
+        source_line = " | ".join(DATA_SOURCE_NOTES) if DATA_SOURCE_NOTES else "資料層待命"
         status_html = f"""
         <div class='status-box'>
             <h3 style="margin-top:0; margin-bottom:8px; color:#2c3e50;">📊 盤前宏觀儀表板</h3>
@@ -571,9 +959,10 @@ if __name__ == "__main__":
             <div style="margin-top: 8px; font-size: 12px; color: #555;">
                 💼 持倉監控: <b>{len(MY_PORTFOLIO)} 檔</b> | 🎯 核心雷達: <b>光通信 / 記憶體 / 太空</b> | 🔥 今日熱門題材: <b>{hot_desc}</b>
             </div>
+            <div style="margin-top: 6px; font-size: 11px; color: #7f8c8d;">資料層: {source_line}</div>
         </div>
         """
-        
+
         sop_legend = """
         <div style="background-color: #fbfbfc; border: 1px solid #e2e8f0; padding: 12px 16px; margin-top: 20px; border-radius: 4px; font-size: 12px; color: #475569;">
             <b style="color: #d35400;">🛡️ 選擇權與實戰執行鐵律：</b>
@@ -584,15 +973,18 @@ if __name__ == "__main__":
             </ul>
         </div>
         """
-        
+
         body = f"{html_style}{status_html}{market_summary_html}<h3 style='margin-bottom:6px;'>🎯 異動標的量化雷達 ({len(target_df)} 檔)</h3>{html_table}{sop_legend}"
-        
+
         to_email = os.environ.get("MAIL_TO")
         from_email = os.environ.get("MAIL_USER")
         app_pass = os.environ.get("MAIL_PASS")
-        
+
         if to_email and from_email and app_pass:
-            today_str = datetime.today().strftime('%m/%d')
+            today_str = datetime.today().strftime("%m/%d")
             send_scan_report_mail(f"🚦 量化狙擊早報 ({today_str}) - {macro_signal}", body, to_email, from_email, app_pass)
         else:
             print("❌ 缺少郵件設定變數 (MAIL_TO / MAIL_USER / MAIL_PASS)")
+            print(target_df.to_string(index=False))
+    else:
+        print("⚠️ 今日無符合條件的掃描結果")
