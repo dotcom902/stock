@@ -2,12 +2,15 @@ name: Daily Stock Scan & Email
 
 on:
   schedule:
+    # 台北/香港時間週二至週六 09:00 (UTC 01:00) 執行
     - cron: '0 1 * * 2-6'
-  workflow_dispatch:
+  workflow_dispatch: # 支援在 GitHub 介面手動觸發測試
 
 jobs:
   scan-and-mail:
     runs-on: ubuntu-latest
+    timeout-minutes: 20  # 防止 API 逾時懸掛
+
     env:
       MAIL_TO: ${{ secrets.MAIL_TO }}
       MAIL_USER: ${{ secrets.MAIL_USER }}
@@ -15,6 +18,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -23,6 +27,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip' # 啟用 pip 套件快取，大幅縮短每日構建耗時
 
       - name: Install dependencies
         run: |
