@@ -1,15 +1,15 @@
-# 核心金融數據與爬蟲套件
+# OpenBB 核心與資料擴展套件
 openbb>=4.0.0
+openbb-yfinance
+openbb-fred
+openbb-fmp
+
+# 原生備援與量化工具
 yfinance>=0.2.40
 pandas>=2.0.0
 numpy>=1.24.0
 requests>=2.31.0
 curl_cffi>=0.7.0
-
-# 網頁與表格解析引擎
 lxml>=4.9.0
 html5lib>=1.1
-openpyxl>=3.1.0
-
-# Google Gemini API
 google-genai>=0.3.0
